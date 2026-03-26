@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# Google API Credentials
+credentials.json
+token.json
+
+# WhatsApp Session Data
+.wwebjs_auth/
