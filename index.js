@@ -210,14 +210,22 @@ client.on('message_create', async msg => { // שינוי חשוב: מאזין ג
                         console.log(`לא שומר איש קשר: ${targetNumber}`);
                         await client.sendMessage(myNumber, `❌ ההודעה טופלה ולא נשמר איש קשר.`);
                     }
-                    // מחיקה מהמאגר לאחר סיום הטיפול
-                    delete pendingContacts[targetNumber];
+                    // סימון שהשיחה טופלה במקום מחיקה, כדי שההודעה האוטומטית לא תישלח לו שוב בהמשך
+                    pendingContacts[targetNumber].step = 'DONE';
                 }
             } else if (trigger) {
                 console.log(`[DEBUG] זוהה טריגר "${trigger}". מעביר לטיפול הפונקציה.`);
                 await handleGeminiCommand(msg, trigger);
             }
         }
+        
+        // הגנה נוספת: אם אמיר שולח הודעה יזומה למספר כלשהו, נסמן אותו במאגר 
+        // כדי שאם הוא יענה (והוא לא שמור באנשי הקשר), הסוכן לא ישגע אותו בבקשת שם
+        if (msg.to !== myNumber) {
+            const targetNum = msg.to.split('@')[0];
+            if (!pendingContacts[targetNum]) pendingContacts[targetNum] = { step: 'DONE' };
+        }
+
         // חשוב: אנחנו עוצרים כאן כדי שהסוכן לא ינתח הודעות שאתה שולח לאנשים אחרים
         return;
     }
