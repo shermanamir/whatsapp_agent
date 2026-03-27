@@ -15,11 +15,24 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // מאגר זמני לשמירת מצב השיחה מול מספקים לא מוכרים
 const pendingContacts = {};
+const pendingCalendarEvents = {}; // מאגר לאירועי יומן שממתינים לאישור
+let lastPendingAction = null; // מנגנון חכם שזוכר מה הדבר האחרון שהסוכן שאל (יומן או איש קשר)
 
 const geminiTriggers = ['גמיני', "ג'ימיני", "ג׳ימיני", "ג'מיני", "ג׳מיני"]; // מילות טריגר להפעלת ג'מיני
 
 const client = new Client({
     authStrategy: new LocalAuth(),
+    puppeteer: {
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu'
+        ]
+    }
 });
 
 // --- פונקציות גוגל (אימות ושמירת אנשי קשר) ---
@@ -154,10 +167,11 @@ client.on('message_create', async msg => { // שינוי חשוב: מאזין ג
                         msg.body = transcription.trim(); // משקרים לפונקציה של ג'מיני כאילו זו הודעת טקסט רגילה
                         await handleGeminiCommand(msg, ""); // הפעלה ללא טריגר מיוחד (העברת הטקסט במלואו)
                     }
+                        return; // עוצרים כאן כדי לא לנתח פקודות של עצמך שוב כטקסט
                 }
             }
-        } catch (e) { console.error("שגיאה בטיפול בהודעה קולית:", e); }
-        return; // עוצרים כאן כדי לא להמשיך לנתח הודעות קוליות כטקסט רגיל
+            } catch (e) { console.error("שגיאה בטיפול בהודעה קולית:", e); return; }
+            // הסרנו את ה-return הכללי שהיה פה כדי שהודעות קוליות נכנסות (אחרי תמלול) ימשיכו ללוגיקת זיהוי היומן!
     }
 
     // ----- לוגיקה להודעות שאתה שולח לעצמך (פקודות לסוכן) -----
@@ -188,8 +202,39 @@ client.on('message_create', async msg => { // שינוי חשוב: מאזין ג
                 const decision = parts[0];
                 let targetNumber = parts[1];
 
-                // אם לא סופק מספר, מחפשים את איש הקשר האחרון שממתין לאישור
-                if (!targetNumber) {
+                let actionType = 'contact'; // ברירת מחדל
+                if (targetNumber === 'יומן') {
+                    actionType = 'calendar';
+                    targetNumber = null;
+                } else if (!targetNumber && lastPendingAction) {
+                    // אם ענית רק "כן", נשתמש בפעולה האחרונה שהסוכן ביקש עליה אישור
+                    targetNumber = lastPendingAction.target;
+                    actionType = lastPendingAction.type;
+                }
+
+                // --- לוגיקת יומן ---
+                if (actionType === 'calendar') {
+                    if (!targetNumber) {
+                        const pendingKeys = Object.keys(pendingCalendarEvents);
+                        if (pendingKeys.length > 0) targetNumber = pendingKeys[pendingKeys.length - 1];
+                    }
+
+                    if (targetNumber && pendingCalendarEvents[targetNumber]) {
+                        if (decision === 'כן') {
+                            const eventData = pendingCalendarEvents[targetNumber];
+                            const link = createCalendarLink(eventData.data, eventData.title, eventData.description);
+                            await client.sendMessage(myNumber, `✅ הנה הקישור להוספת הפגישה ליומן (לחץ לפתיחה):\n${link}`);
+                        } else if (decision === 'לא') {
+                            await client.sendMessage(myNumber, `❌ בוטל. לא אצור קישור לפגישה.`);
+                        }
+                        delete pendingCalendarEvents[targetNumber];
+                    }
+                    if (lastPendingAction && lastPendingAction.type === 'calendar') lastPendingAction = null;
+                    return; // מסיימים כאן ללוגיקת היומן
+                }
+
+                // --- לוגיקת שמירת איש קשר (הקיימת) ---
+                if (!targetNumber) { // גיבוי אם אין lastPendingAction
                     const pendingKeys = Object.keys(pendingContacts).filter(k => pendingContacts[k].step === 'WAITING_FOR_APPROVAL');
                     if (pendingKeys.length > 0) {
                         targetNumber = pendingKeys[pendingKeys.length - 1]; // לוקח את האחרון ברשימה
@@ -213,6 +258,7 @@ client.on('message_create', async msg => { // שינוי חשוב: מאזין ג
                     // סימון שהשיחה טופלה במקום מחיקה, כדי שההודעה האוטומטית לא תישלח לו שוב בהמשך
                     pendingContacts[targetNumber].step = 'DONE';
                 }
+                if (lastPendingAction && lastPendingAction.type === 'contact') lastPendingAction = null;
             } else if (trigger) {
                 console.log(`[DEBUG] זוהה טריגר "${trigger}". מעביר לטיפול הפונקציה.`);
                 await handleGeminiCommand(msg, trigger);
@@ -230,15 +276,14 @@ client.on('message_create', async msg => { // שינוי חשוב: מאזין ג
         return;
     }
 
-    // מתעלמים מהודעות של קבוצות
-    if (contact.isGroup) return;
-
     // ----- לוגיקה לאנשי קשר לא שמורים (לא מוכרים) -----
+    let skipCalendar = false;
     if (!contact.isMyContact) {
         console.log(`[DEBUG] זוהתה הודעה מאיש קשר לא שמור: ${senderNumber}`);
         if (!pendingContacts[senderNumber]) {
             // שלב 1: איש קשר חדש לחלוטין שמייצר אינטראקציה ראשונה
             console.log(`[DEBUG] שלב 1: מתחיל אינטראקציה ראשונה מול ${senderNumber}, מבקש שם.`);
+            skipCalendar = true; // מדלגים על זיהוי יומן כי אנחנו ממתינים לשם
             pendingContacts[senderNumber] = {
                 step: 'WAITING_FOR_NAME',
                 originalMsg: msg.body
@@ -251,8 +296,10 @@ client.on('message_create', async msg => { // שינוי חשוב: מאזין ג
             const originalMsg = pendingContacts[senderNumber].originalMsg;
             console.log(`[DEBUG] שלב 2: התקבל השם '${senderName}' מהמספר ${senderNumber}. שולח בקשת אישור לאמיר...`);
             
+            skipCalendar = true; // עדיין לא לנתח הודעה זו ליומן
             pendingContacts[senderNumber].step = 'WAITING_FOR_APPROVAL';
             pendingContacts[senderNumber].name = senderName;
+            lastPendingAction = { type: 'contact', target: senderNumber }; // מעדכנים את ההמתנה
 
             // שולח הודעה לוואטסאפ של הסוכן/שלך בשבילך
             const approvalMessage = `🔔 *הודעה ממשתמש לא מוכר!*\n\n*שם:* ${senderName}\n*הודעה מקורית:* ${originalMsg}\n\nהאם ברצונך לשמור את ${senderName}?\nהשב למטה בטקסט: *"כן"* כדי לשמור, או *"לא"* כדי לבטל.`;
@@ -260,6 +307,23 @@ client.on('message_create', async msg => { // שינוי חשוב: מאזין ג
             console.log(`[DEBUG] נשלחה הודעת אישור לשמירה למספר של אמיר: ${myNumber}`);
             
             await msg.reply("תודה, שמך נמסר. הודעתך המקורית הועברה בהצלחה לאמיר.");
+        }
+    }
+
+    // --- זיהוי אוטומטי של תאריכים ופגישות ליומן ---
+    if (!skipCalendar && msg.body && msg.body.trim() !== '') {
+        const senderName = contact.name || senderNumber;
+        const eventData = await analyzeForCalendarEvent(msg.body);
+        if (eventData && eventData.hasEvent) {
+            pendingCalendarEvents[senderNumber] = {
+                data: eventData,
+                title: `${senderName} זימן פגישה`,
+                description: msg.body
+            };
+            lastPendingAction = { type: 'calendar', target: senderNumber };
+            
+            const askMsg = `📅 *זיהוי אירוע ליומן!*\n\nהודעה מ-${senderName}:\n"${msg.body}"\n\nהאם תרצה לקבוע פגישה ביומן לאותו מועד?\nהשב *"כן"* כדי לקבל קישור להוספה מהירה ליומן גוגל, או *"לא"* כדי להתעלם.`;
+            await client.sendMessage(myNumber, askMsg);
         }
     }
 });
@@ -337,7 +401,9 @@ async function sendMessageToContact(contactNameOrPhone, message) {
 
 async function transcribeAudio(media) {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+        // --- התיקון השני: שימוש במודל חזק יותר לתמלול ---
+        // gemini-1.5-pro-latest ידוע ביכולות הניתוח המעמיקות שלו על קבצים ארוכים, מה שאמור לשפר את דיוק התמלול.
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro-latest" });
         const prompt = "תמלל את ההודעה הקולית הבאה בעברית בצורה מדויקת. אל תוסיף הקדמות או תוספות, רק את המלל שנאמר.";
         const audioPart = {
             inlineData: {
@@ -351,6 +417,69 @@ async function transcribeAudio(media) {
         console.error("שגיאה בתמלול מג'מיני:", e);
         return null;
     }
+}
+
+// --- פונקציות עזר לזיהוי וליצירת קישור יומן ---
+async function analyzeForCalendarEvent(text) {
+    try {
+        const now = new Date();
+        const model = genAI.getGenerativeModel({
+            model: "gemini-2.5-flash",
+            generationConfig: { responseMimeType: "application/json" }
+        });
+        const prompt = `
+        התאריך והשעה הנוכחיים: ${now.toISOString()}.
+        נתח את ההודעה הבאה:
+        "${text}"
+        האם ההודעה מציעה לקבוע פגישה, או מציינת תאריך/שעה ספציפיים (לדוגמה: "מחר ב-10", "ביום שני", "נדבר ב-15:00")?
+        החזר JSON (ללא שום טקסט נוסף):
+        {
+          "hasEvent": boolean,
+          "year": מספר השנה המלא (למשל 2026) או null,
+          "month": מספר החודש (1-12) או null,
+          "day": מספר היום בחודש (1-31) או null,
+          "hour": מספר השעה בפורמט 24 (0-23) או null,
+          "minute": מספר הדקה (0-59) או null
+        }
+        שים לב:
+        - אם צוינה רק שעה בלי תאריך, השתמש בתאריך של היום.
+        - אם צוין רק תאריך בלי שעה, הגדר hour ו-minute כ-null.
+        `;
+        const result = await model.generateContent(prompt);
+        let rawText = result.response.text();
+        rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+        return JSON.parse(rawText);
+    } catch(e) {
+        console.error("שגיאה בניתוח יומן:", e);
+        return { hasEvent: false };
+    }
+}
+
+function createCalendarLink(eventData, title, description) {
+    let startDate = new Date();
+    let isAllDay = false;
+
+    if (eventData.year && eventData.month && eventData.day) {
+        startDate.setFullYear(eventData.year, eventData.month - 1, eventData.day);
+    }
+    if (eventData.hour !== null && eventData.minute !== null) {
+        startDate.setHours(eventData.hour, eventData.minute, 0, 0);
+    } else {
+        isAllDay = true;
+    }
+
+    let endDate = new Date(startDate);
+    if (isAllDay) endDate.setDate(endDate.getDate() + 1);
+    else endDate.setHours(endDate.getHours() + 1); // פגישה סטנדרטית של שעה
+
+    const format = (d, allday) => {
+        const pad = n => n.toString().padStart(2, '0');
+        const str = `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}`;
+        return allday ? str : `${str}T${pad(d.getHours())}${pad(d.getMinutes())}00`;
+    };
+
+    const dates = `${format(startDate, isAllDay)}/${format(endDate, isAllDay)}`;
+    return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&details=${encodeURIComponent(description)}&dates=${dates}`;
 }
 
 client.initialize();
