@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WhatsApp Agent</title>
+    <style>
+        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; flex-direction: column; }
+        #qrcode { border: 1px solid #ccc; padding: 20px; }
+        #status { margin-top: 20px; font-size: 1.2em; }
+    </style>
+</head>
+<body>
+    <h1>WhatsApp Agent Connection</h1>
+    <div id="qrcode"></div>
+    <p id="status">Waiting for QR Code...</p>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const qrCodeContainer = document.getElementById('qrcode');
+        const statusElement = document.getElementById('status');
+
+        socket.on('qr', (qr) => {
+            qrCodeContainer.innerHTML = `<img src="${qr}" alt="QR Code">`;
+            statusElement.textContent = 'Please scan the QR code with your WhatsApp app.';
+        });
+
+        socket.on('ready', () => {
+            qrCodeContainer.innerHTML = '';
+            statusElement.textContent = '✅ Agent is connected and ready!';
+        });
+
+        socket.on('disconnected', () => {
+            statusElement.textContent = '❌ Agent disconnected. Please refresh the page to reconnect.';
+        });
+    </script>
+</body>
+</html>

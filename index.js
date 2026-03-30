@@ -5,6 +5,11 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { google } = require('googleapis');
 const fs = require('fs');
 const readline = require('readline');
+const TelegramBot = require('node-telegram-bot-api');
+const express = require('express');
+const http = require('http');
+const { Server } = require("socket.io");
+const qrcodeGenerator = require('qrcode');
 
 const SCOPES = ['https://www.googleapis.com/auth/contacts'];
 const TOKEN_PATH = 'token.json';
@@ -13,6 +18,43 @@ const TOKEN_PATH = 'token.json';
 // ודא שיצרת קובץ .env עם המפתח שלך תחת השם GEMINI_API_KEY
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+// --- הגדרות Telegram ---
+const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+const telegramChatId = process.env.TELEGRAM_CHAT_ID;
+let telegramBot = null;
+if (telegramToken && telegramChatId) {
+    telegramBot = new TelegramBot(telegramToken, {polling: true}); // הפעלנו האזנה כדי שנוכל ללחוץ על כפתורים
+
+    // מאזין ללחיצות על כפתורים בטלגרם (Inline Keyboard)
+    telegramBot.on('callback_query', (callbackQuery) => {
+        const action = callbackQuery.data;
+        const chatId = callbackQuery.message.chat.id;
+        const messageId = callbackQuery.message.message_id;
+
+        if (action.startsWith('save_contact_')) {
+            const targetNumber = action.replace('save_contact_', '');
+            if (pendingContacts[targetNumber]) {
+                const targetName = pendingContacts[targetNumber].name;
+                const myNumber = client.info && client.info.wid ? client.info.wid._serialized : null;
+                
+                if (myNumber) {
+                    telegramBot.sendMessage(chatId, `✅ מתחיל תהליך שמירה של ${targetName} לאנשי הקשר בגוגל...`);
+                    authorizeAndSaveContact(targetName, targetNumber, myNumber); // קורא לפונקציה הקיימת ששומרת לגוגל
+                }
+                pendingContacts[targetNumber].step = 'DONE';
+                telegramBot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId }); // מעלים את הכפתורים אחרי הלחיצה
+            }
+        } else if (action.startsWith('ignore_contact_')) {
+            const targetNumber = action.replace('ignore_contact_', '');
+            if (pendingContacts[targetNumber]) {
+                pendingContacts[targetNumber].step = 'DONE';
+                telegramBot.sendMessage(chatId, `❌ השמירה בוטלה.`);
+                telegramBot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId }); // מעלים את הכפתורים
+            }
+        }
+    });
+}
+
 // מאגר זמני לשמירת מצב השיחה מול מספקים לא מוכרים
 const pendingContacts = {};
 const pendingCalendarEvents = {}; // מאגר לאירועי יומן שממתינים לאישור
@@ -20,8 +62,13 @@ let lastPendingAction = null; // מנגנון חכם שזוכר מה הדבר ה
 
 const geminiTriggers = ['גמיני', "ג'ימיני", "ג׳ימיני", "ג'מיני", "ג׳מיני"]; // מילות טריגר להפעלת ג'מיני
 
+// --- הגדרות שרת Web ---
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
 const client = new Client({
-    authStrategy: new LocalAuth(),
+    authStrategy: new LocalAuth({ clientId: "main-user" }), // הוספת clientId כדי לתמוך בריבוי משתמשים בעתיד
     puppeteer: {
         args: [
             '--no-sandbox',
@@ -34,6 +81,8 @@ const client = new Client({
         ]
     }
 });
+
+let agentReadyTimestamp = null;
 
 // --- פונקציות גוגל (אימות ושמירת אנשי קשר) ---
 function authorizeAndSaveContact(contactName, contactNumber, myNumber) {
@@ -117,18 +166,39 @@ const tools = [
     },
 ];
 
+// --- הגדרת נקודות קצה (Endpoints) לשרת ---
+app.get('/', (req, res) => {
+    res.sendFile(__dirname + '/index.html');
+});
+
 client.on('qr', (qr) => {
-    console.log('הסוכן מוכן לחיבור! אנא סרוק את הברקוד עם אפליקציית הוואטסאפ שלך בטלפון:');
-    qrcode.generate(qr, { small: true });
+    console.log('QR Code received, sending to web client.');
+    qrcodeGenerator.toDataURL(qr, (err, url) => {
+        io.emit('qr', url); // שולח את ה-QR כ-URL של תמונה לדפדפן
+    });
 });
 
 client.on('ready', () => {
+    agentReadyTimestamp = Math.floor(Date.now() / 1000);
     console.log('הסוכן התחבר לוואטסאפ בהצלחה וממתין להודעות!');
+    io.emit('ready'); // מודיע לדפדפן שהחיבור הצליח
+});
+
+client.on('disconnected', (reason) => {
+    console.log('Client was logged out', reason);
+    io.emit('disconnected');
 });
 
 client.on('message_create', async msg => { // שינוי חשוב: מאזין גם להודעות שאתה שולח
+    // התעלמות מהודעות ישנות שהתקבלו לפני שהסוכן הופעל
+    if (agentReadyTimestamp && msg.timestamp < agentReadyTimestamp) return;
+
     // התעלמות מעדכוני סטטוס, הודעות מערכת, וכתובות פנימיות של וואטסאפ (כמו @lid)
-    if (msg.isStatus || msg.from === 'status@broadcast' || msg.from.includes('@lid') || msg.to.includes('@lid')) return;
+    // נוספה התעלמות מהודעות מערכת על שינוי מפתח הצפנה (e2e_notification, protocol וכו')
+    if (msg.isStatus || msg.from === 'status@broadcast' || msg.from.includes('@lid') || msg.to.includes('@lid') || msg.type === 'e2e_notification' || msg.type === 'protocol' || msg.type === 'notification_template') return;
+
+    // התעלמות מוחלטת מהודעות של קבוצות (זיהוי לפי סיומת @g.us)
+    if (msg.from.endsWith('@g.us') || msg.to.endsWith('@g.us')) return;
 
     // התעלמות מהודעות ריקות ללא טקסט וללא מדיה
     if ((!msg.body || msg.body.trim() === '') && !msg.hasMedia) return;
@@ -149,29 +219,20 @@ client.on('message_create', async msg => { // שינוי חשוב: מאזין ג
         try {
             const media = await msg.downloadMedia();
             if (media) {
-                if (msg.from !== myNumber) {
-                    // הודעה מאדם אחר - נתמלל ונשלח אליך
-                    const senderName = contact.name || contact.number;
-                    console.log(`[DEBUG] מתמלל הודעה קולית מ-${senderName}`);
-                    const transcription = await transcribeAudio(media);
-                    if (transcription) {
-                        await msg.reply(`🎤 *תמלול (אוטומטי):*\n\n"${transcription.trim()}"`);
+                const senderName = msg.from === myNumber ? 'אמיר' : (contact.name || contact.number);
+                console.log(`[DEBUG] מתמלל הודעה קולית מ-${senderName}`);
+                const transcription = await transcribeAudio(media);
+                if (transcription) {
+                    // שליחה לטלגרם בלבד - ללא הודעות בוואטסאפ או פקודות לג'מיני
+                    if (telegramBot) {
+                        await telegramBot.sendMessage(telegramChatId, `${senderName} - אמר : "${transcription.trim()}"`);
                     }
-                } else if (msg.to === myNumber) {
-                    // הודעה לעצמך - פקודה קולית לג'מיני
-                    console.log(`[DEBUG] מפענח פקודה קולית ששלחת לעצמך`);
-                    await client.sendMessage(myNumber, `🤖 מתמלל את הפקודה הקולית שלך...`);
-                    const transcription = await transcribeAudio(media);
-                    if (transcription) {
-                        await client.sendMessage(myNumber, `🗣️ זיהיתי שאמרת: "${transcription.trim()}"\nמעביר לג'מיני...`);
-                        msg.body = transcription.trim(); // משקרים לפונקציה של ג'מיני כאילו זו הודעת טקסט רגילה
-                        await handleGeminiCommand(msg, ""); // הפעלה ללא טריגר מיוחד (העברת הטקסט במלואו)
-                    }
-                        return; // עוצרים כאן כדי לא לנתח פקודות של עצמך שוב כטקסט
+                    // מעדכנים את גוף ההודעה כדי לאפשר זיהוי תאריכים בהמשך
+                    msg.body = transcription.trim();
                 }
             }
-            } catch (e) { console.error("שגיאה בטיפול בהודעה קולית:", e); return; }
-            // הסרנו את ה-return הכללי שהיה פה כדי שהודעות קוליות נכנסות (אחרי תמלול) ימשיכו ללוגיקת זיהוי היומן!
+        } catch (e) { console.error("שגיאה בטיפול בהודעה קולית:", e); return; }
+        // לא עושים return כללי כדי שהטקסט המתומלל ימשיך ללוגיקת זיהוי יומן בסוף!
     }
 
     // ----- לוגיקה להודעות שאתה שולח לעצמך (פקודות לסוכן) -----
@@ -288,7 +349,7 @@ client.on('message_create', async msg => { // שינוי חשוב: מאזין ג
                 step: 'WAITING_FOR_NAME',
                 originalMsg: msg.body
             };
-            await msg.reply("מספר הטלפון שלך לא נמצא ברשימת אנשי הקשר של אמיר, אנא שלח את שמך המלא.");
+            await msg.reply("אינך מופיע באנשי הקשר שלי אנא שלח את שמך המלא על מנת שאשמור אותך באנשי הקשר שלי"); // נשארה רק ההודעה המעודכנת
             
         } else if (pendingContacts[senderNumber].step === 'WAITING_FOR_NAME') {
             // שלב 2: התקבל שם משתמש, כעת הסוכן מעביר הכל לאמיר
@@ -301,10 +362,27 @@ client.on('message_create', async msg => { // שינוי חשוב: מאזין ג
             pendingContacts[senderNumber].name = senderName;
             lastPendingAction = { type: 'contact', target: senderNumber }; // מעדכנים את ההמתנה
 
-            // שולח הודעה לוואטסאפ של הסוכן/שלך בשבילך
-            const approvalMessage = `🔔 *הודעה ממשתמש לא מוכר!*\n\n*שם:* ${senderName}\n*הודעה מקורית:* ${originalMsg}\n\nהאם ברצונך לשמור את ${senderName}?\nהשב למטה בטקסט: *"כן"* כדי לשמור, או *"לא"* כדי לבטל.`;
-            await client.sendMessage(myNumber, approvalMessage);
-            console.log(`[DEBUG] נשלחה הודעת אישור לשמירה למספר של אמיר: ${myNumber}`);
+            if (telegramBot) {
+                const options = {
+                    parse_mode: 'Markdown',
+                    reply_markup: {
+                        inline_keyboard: [
+                            [
+                                { text: '✅ שמור לאנשי קשר', callback_data: `save_contact_${senderNumber}` },
+                                { text: '❌ התעלם', callback_data: `ignore_contact_${senderNumber}` }
+                            ]
+                        ]
+                    }
+                };
+                const tgMsg = `🔔 *הודעה ממשתמש לא מוכר בוואטסאפ!*\n\n*שם:* ${senderName}\n*מספר:* +${senderNumber}\n*הודעה:* ${originalMsg}\n\nהאם לשמור לאנשי קשר?`;
+                await telegramBot.sendMessage(telegramChatId, tgMsg, options);
+                console.log(`[DEBUG] נשלחה בקשת אישור לשמירה בטלגרם עם כפתורים.`);
+            } else {
+                // גיבוי לוואטסאפ במקרה שאין טלגרם
+                const approvalMessage = `🔔 *הודעה ממשתמש לא מוכר!*\n\n*שם:* ${senderName}\n*הודעה מקורית:* ${originalMsg}\n\nהאם ברצונך לשמור את ${senderName}?\nהשב למטה בטקסט: *"כן"* כדי לשמור, או *"לא"* כדי לבטל.`;
+                await client.sendMessage(myNumber, approvalMessage);
+                console.log(`[DEBUG] נשלחה הודעת אישור לשמירה למספר של אמיר: ${myNumber}`);
+            }
             
             await msg.reply("תודה, שמך נמסר. הודעתך המקורית הועברה בהצלחה לאמיר.");
         }
@@ -312,18 +390,21 @@ client.on('message_create', async msg => { // שינוי חשוב: מאזין ג
 
     // --- זיהוי אוטומטי של תאריכים ופגישות ליומן ---
     if (!skipCalendar && msg.body && msg.body.trim() !== '') {
-        const senderName = contact.name || senderNumber;
-        const eventData = await analyzeForCalendarEvent(msg.body);
-        if (eventData && eventData.hasEvent) {
-            pendingCalendarEvents[senderNumber] = {
-                data: eventData,
-                title: `${senderName} זימן פגישה`,
-                description: msg.body
-            };
-            lastPendingAction = { type: 'calendar', target: senderNumber };
-            
-            const askMsg = `📅 *זיהוי אירוע ליומן!*\n\nהודעה מ-${senderName}:\n"${msg.body}"\n\nהאם תרצה לקבוע פגישה ביומן לאותו מועד?\nהשב *"כן"* כדי לקבל קישור להוספה מהירה ליומן גוגל, או *"לא"* כדי להתעלם.`;
-            await client.sendMessage(myNumber, askMsg);
+        // שלב מקדים: בודקים אם יש סיכוי בכלל שיש פה תאריך כדי לא להעמיס על ה-API
+        if (preAnalyzeForCalendar(msg.body)) {
+            const senderName = contact.name || senderNumber;
+            const eventData = await analyzeForCalendarEvent(msg.body);
+            if (eventData && eventData.hasEvent) {
+                pendingCalendarEvents[senderNumber] = {
+                    data: eventData,
+                    title: `${senderName} זימן פגישה`,
+                    description: msg.body
+                };
+                lastPendingAction = { type: 'calendar', target: senderNumber };
+                
+                const askMsg = `📅 *זיהוי אירוע ליומן!*\n\nהודעה מ-${senderName}:\n"${msg.body}"\n\nהאם תרצה לקבוע פגישה ביומן לאותו מועד?\nהשב *"כן"* כדי לקבל קישור להוספה מהירה ליומן גוגל, או *"לא"* כדי להתעלם.`;
+                await client.sendMessage(myNumber, askMsg);
+            }
         }
     }
 });
@@ -401,9 +482,8 @@ async function sendMessageToContact(contactNameOrPhone, message) {
 
 async function transcribeAudio(media) {
     try {
-        // --- התיקון השני: שימוש במודל חזק יותר לתמלול ---
-        // gemini-1.5-pro-latest ידוע ביכולות הניתוח המעמיקות שלו על קבצים ארוכים, מה שאמור לשפר את דיוק התמלול.
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro-latest" });
+        // חזרנו למודל ה-Flash המהיר והזמין בוודאות בחשבון שלך
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
         const prompt = "תמלל את ההודעה הקולית הבאה בעברית בצורה מדויקת. אל תוסיף הקדמות או תוספות, רק את המלל שנאמר.";
         const audioPart = {
             inlineData: {
@@ -420,6 +500,13 @@ async function transcribeAudio(media) {
 }
 
 // --- פונקציות עזר לזיהוי וליצירת קישור יומן ---
+function preAnalyzeForCalendar(text) {
+    // בודק מילות מפתח ודפוסים נפוצים לפני ששולחים ל-API היקר
+    const keywords = ['מחר', 'היום', 'שעה', 'ב-', 'בבוקר', 'בערב', 'בצהריים', 'יום', 'שבוע', 'פגישה'];
+    const regex = new RegExp(keywords.join('|') + '|\\d{1,2}[\\/\\.:]\\d{1,2}', 'i');
+    return regex.test(text);
+}
+
 async function analyzeForCalendarEvent(text) {
     try {
         const now = new Date();
@@ -482,4 +569,9 @@ function createCalendarLink(eventData, title, description) {
     return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&details=${encodeURIComponent(description)}&dates=${dates}`;
 }
 
+// --- הפעלת השרת והסוכן ---
 client.initialize();
+
+server.listen(3000, () => {
+    console.log('Web server listening on port 3000. Open http://localhost:3000 in your browser.');
+});
