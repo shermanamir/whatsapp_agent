@@ -570,7 +570,7 @@ function createCalendarLink(eventData, title, description) {
 }
 
 // --- הפעלת השרת והסוכן ---
-client.initialize();
+connectToWhatsApp();
 
 server.listen(3000, () => {
     console.log('Web server listening on port 3000. Open http://localhost:3000 in your browser.');
