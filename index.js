@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, fetchLatestBaileysVersion, getContentType, Browsers } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { google } = require('googleapis');
@@ -24,16 +24,17 @@ let telegramBot = null;
 if (telegramToken && telegramChatId) {
     telegramBot = new TelegramBot(telegramToken, { polling: true });
 
-    telegramBot.on('callback_query', (callbackQuery) => {
+    telegramBot.on('callback_query', async (callbackQuery) => {
         const action = callbackQuery.data;
         const chatId = callbackQuery.message.chat.id;
         const messageId = callbackQuery.message.message_id;
+        const myNumber = sock && sock.user ? sock.user.id.split(':')[0] : null;
+        const myJid = myNumber ? `${myNumber}@s.whatsapp.net` : null;
 
         if (action.startsWith('save_contact_')) {
             const targetNumber = action.replace('save_contact_', '');
             if (pendingContacts[targetNumber]) {
                 const targetName = pendingContacts[targetNumber].name;
-                const myNumber = sock && sock.user ? sock.user.id.split(':')[0] : null;
 
                 if (myNumber) {
                     telegramBot.sendMessage(chatId, `✅ מתחיל תהליך שמירה של ${targetName} לאנשי הקשר בגוגל...`);
@@ -47,6 +48,31 @@ if (telegramToken && telegramChatId) {
             if (pendingContacts[targetNumber]) {
                 pendingContacts[targetNumber].step = 'DONE';
                 telegramBot.sendMessage(chatId, `❌ השמירה בוטלה.`);
+                telegramBot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId });
+            }
+        } else if (action.startsWith('calendar_yes_')) {
+            const targetNumber = action.replace('calendar_yes_', '');
+            if (pendingCalendarEvents[targetNumber]) {
+                const eventData = pendingCalendarEvents[targetNumber];
+                const link = createCalendarLink(eventData.data, eventData.title, eventData.description);
+                
+                await telegramBot.sendMessage(chatId, `✅ הנה הקישור להוספת הפגישה ליומן (לחץ לפתיחה):\n${link}`);
+                
+                if (myJid) {
+                    await sock.sendMessage(myJid, { text: `✅ הנה הקישור להוספת הפגישה ליומן (לחץ לפתיחה):\n${link}` });
+                }
+
+                delete pendingCalendarEvents[targetNumber];
+                if (lastPendingAction && lastPendingAction.target === targetNumber) lastPendingAction = null;
+                
+                telegramBot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId });
+            }
+        } else if (action.startsWith('calendar_no_')) {
+            const targetNumber = action.replace('calendar_no_', '');
+            if (pendingCalendarEvents[targetNumber]) {
+                delete pendingCalendarEvents[targetNumber];
+                if (lastPendingAction && lastPendingAction.target === targetNumber) lastPendingAction = null;
+                await telegramBot.sendMessage(chatId, `❌ בוטל. לא נוצר אירוע ביומן.`);
                 telegramBot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId });
             }
         }
@@ -176,7 +202,7 @@ async function connectToWhatsApp() {
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['WhatsApp Agent', 'Chrome', '1.0.0'],
+        browser: Browsers.macOS('Desktop'), // שימוש בהגדרת דפדפן רשמית ובטוחה של הספרייה
         keepAliveIntervalMs: 30000 // שליחת אות חיים כל 30 שניות למניעת ניתוקים
     });
     
@@ -212,11 +238,15 @@ async function connectToWhatsApp() {
             });
         }
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('Client disconnected due to error:', lastDisconnect.error?.message || lastDisconnect.error);
-            console.log('Reconnecting in 3 seconds:', shouldReconnect);
+            isAgentReady = false; // איפוס הדגל בעת ניתוק
+            const statusCode = (lastDisconnect.error)?.output?.statusCode;
+            // Don't reconnect on logout or if another client took over
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== DisconnectReason.streamReplaced;
+            console.error('Connection closed due to:', lastDisconnect.error, `, reconnecting: ${shouldReconnect}`);
             io.emit('disconnected');
-            if (shouldReconnect) setTimeout(connectToWhatsApp, 3000); // הוספנו השהיה של 3 שניות למניעת לולאה אינסופית
+            if (!shouldReconnect) console.log("Not reconnecting due to a terminal error (e.g., logged out or stream replaced). Please restart the agent manually if needed.");
+            // הוספנו השהיה של 5 שניות למניעת לולאה אינסופית מהירה
+            if (shouldReconnect) setTimeout(connectToWhatsApp, 5000); 
         } else if (connection === 'open') {
             isAgentReady = true; // הסוכן מוכן לקבל הודעות חדשות
             console.log('הסוכן התחבר לוואטסאפ בהצלחה וממתין להודעות!');
@@ -225,45 +255,90 @@ async function connectToWhatsApp() {
     });
 
     sock.ev.on('messages.upsert', async m => {
+        // --- CRITICAL DEBUGGING ---
+        // This will log the raw message object to help diagnose why messages are being ignored.
+        console.log('Received raw upsert event:', JSON.stringify(m, null, 2));
+
         if (m.type !== 'notify') return;
         // התעלמות מכל הודעה שהגיעה לפני שהחיבור הושלם
         if (!isAgentReady) return;
 
         const msg = m.messages[0];
-        if (!msg.message) return;
+        if (!msg.message) { console.log('[DEBUG] Ignored message because msg.message is null.'); return; }
 
         const remoteJid = msg.key.remoteJid;
         const fromMe = msg.key.fromMe;
         
-        // התעלמות מקבוצות, סטטוסים ומזהי מערכת פנימיים (@lid)
-        if (remoteJid.endsWith('@g.us') || remoteJid.endsWith('@lid') || remoteJid === 'status@broadcast') return;
+        // התעלמות מקבוצות וסטטוסים. LIDs מטופלים כעת.
+        if (remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') return;
 
-        const messageType = Object.keys(msg.message)[0];
-        if (messageType === 'protocolMessage' || messageType === 'senderKeyDistributionMessage') return;
+        // קביעת המזהה האמיתי של השולח. עם LIDs, ה-remoteJid הוא מזהה השיחה, וה-senderPn הוא מספר הטלפון האמיתי.
+        const senderJid = msg.key.senderPn || remoteJid;
 
-        const myNumberBase = sock.user.id.split(':')[0];
+        // -- Start of Message Unwrapping --
+        // This block handles various message wrappers (like ephemeral messages) to extract the actual content.
+        let innerMsg = msg.message;
+        // Loop to unpack multiple layers of wrappers
+        while (innerMsg.ephemeralMessage || innerMsg.viewOnceMessage || innerMsg.viewOnceMessageV2 || innerMsg.documentWithCaptionMessage) {
+            innerMsg = innerMsg.ephemeralMessage?.message ||
+                       innerMsg.viewOnceMessage?.message ||
+                       innerMsg.viewOnceMessageV2?.message ||
+                       innerMsg.documentWithCaptionMessage?.message;
+            // If at any point unwrapping leads to a null/undefined message, break.
+            if (!innerMsg) break;
+        }
+
+        // If after unwrapping, there's no valid message, ignore it.
+        if (!innerMsg) {
+            console.log('[DEBUG] Ignored message: unwrapping resulted in null.');
+            return;
+        }
+
+        let messageType = getContentType(innerMsg);
+        if (!messageType) {
+            console.log('[DEBUG] Ignored message: could not determine type after unwrapping.');
+            return;
+        }
+
+        const messageContent = innerMsg[messageType];
+        if (!messageContent) {
+            console.log(`[DEBUG] Ignored message: type "${messageType}" had no content.`);
+            return;
+        }
+        // -- End of Message Unwrapping --
+
+        if (messageType === 'protocolMessage' || messageType === 'senderKeyDistributionMessage') {
+            console.log(`[DEBUG] Ignored system message of type: ${messageType}`);
+            return;
+        }
+
+        const myNumberBase = sock.user?.id?.split(':')[0];
+        if (!myNumberBase) return; // הגנה למקרה שהסוכן לא סיים אתחול לגמרי
+
         const myJid = `${myNumberBase}@s.whatsapp.net`;
-        const senderNumber = remoteJid.split('@')[0];
+        const senderNumber = senderJid.split('@')[0]; // שימוש במספר האמיתי של השולח
         const isSentToMe = remoteJid.startsWith(myNumberBase);
 
         let body = '';
-        if (messageType === 'conversation') body = msg.message.conversation;
-        else if (messageType === 'extendedTextMessage') body = msg.message.extendedTextMessage.text;
+        if (messageType === 'conversation') body = messageContent;
+        else if (messageType === 'extendedTextMessage') body = messageContent?.text;
+        else if (messageType === 'imageMessage' && messageContent?.caption) body = messageContent.caption;
+        else if (messageType === 'videoMessage' && messageContent?.caption) body = messageContent.caption;
         
         const pushName = msg.pushName || senderNumber;
-        const isMyContact = !!myContacts[remoteJid];
+        const isMyContact = !!myContacts[senderJid]; // בדיקה מול המזהה האמיתי
 
         if ((!body || body.trim() === '') && messageType !== 'audioMessage') return;
 
-        console.log(`[DEBUG] התקבלה הודעה מ: ${remoteJid}, אל: ${fromMe ? remoteJid : myJid}, תוכן: "${body}"`);
+        console.log(`[DEBUG] התקבלה הודעה מ: ${remoteJid}, אל: ${fromMe ? remoteJid : myJid}, סוג: ${messageType}, תוכן: "${body}"`);
 
-        if (messageType === 'audioMessage' && msg.message.audioMessage.ptt) {
+        if (messageType === 'audioMessage' && messageContent?.ptt) {
             try {
                 const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }) });
                 if (buffer) {
-                    const senderName = fromMe ? 'אמיר' : (myContacts[remoteJid] || pushName);
+                    const senderName = fromMe ? 'אמיר' : (myContacts[senderJid] || pushName);
                     console.log(`[DEBUG] מתמלל הודעה קולית מ-${senderName}`);
-                    const media = { data: buffer.toString('base64'), mimetype: msg.message.audioMessage.mimetype };
+                    const media = { data: buffer.toString('base64'), mimetype: messageContent.mimetype };
                     const transcription = await transcribeAudio(media);
                     if (transcription) {
                         // שולח את התמלול לטלגרם רק אם ההודעה הגיעה ממישהו אחר (לא ממך)
@@ -271,98 +346,27 @@ async function connectToWhatsApp() {
                             await telegramBot.sendMessage(telegramChatId, `${senderName} - אמר : "${transcription.trim()}"`).catch(console.error);
                         }
                         body = transcription.trim();
+                        // After transcription, treat it as a text message for further processing
+                        messageType = 'conversation';
                     }
                 }
             } catch (e) { console.error("שגיאה בטיפול בהודעה קולית:", e); return; }
         }
 
-        if (fromMe) {
-            if (isSentToMe) {
-                if (body.startsWith("ג'מיני:") || body.includes("🤖") || body.startsWith("✅") || body.startsWith("❌") || body.startsWith("שגיאה") || body.startsWith("🔔")) return;
-                console.log('[DEBUG] זוהתה הודעה שנשלחה לעצמך (ערוץ פקודות).');
-                
-                const commandBody = body.toLowerCase();
-                const trigger = geminiTriggers.find(t => commandBody.startsWith(t));
-                const bodyExact = body.trim();
-                const startsWithYesNo = body.startsWith('כן ') || body.startsWith('לא ');
+        // --- Main Logic Flow ---
 
-                if (bodyExact === 'כן' || bodyExact === 'לא' || startsWithYesNo) {
-                    const parts = body.split(' ');
-                    const decision = parts[0];
-                    let targetNumber = parts[1];
-                    let actionType = 'contact';
-                    
-                    if (targetNumber === 'יומן') { actionType = 'calendar'; targetNumber = null; }
-                    else if (!targetNumber && lastPendingAction) { targetNumber = lastPendingAction.target; actionType = lastPendingAction.type; }
-
-                    if (actionType === 'calendar') {
-                        if (!targetNumber) {
-                            const pendingKeys = Object.keys(pendingCalendarEvents);
-                            if (pendingKeys.length > 0) targetNumber = pendingKeys[pendingKeys.length - 1];
-                        }
-                        if (targetNumber && pendingCalendarEvents[targetNumber]) {
-                            if (decision === 'כן') {
-                                const eventData = pendingCalendarEvents[targetNumber];
-                                const link = createCalendarLink(eventData.data, eventData.title, eventData.description);
-                                await sock.sendMessage(myJid, { text: `✅ הנה הקישור להוספת הפגישה ליומן (לחץ לפתיחה):\n${link}` });
-                            } else if (decision === 'לא') {
-                                await sock.sendMessage(myJid, { text: `❌ בוטל. לא אצור קישור לפגישה.` });
-                            }
-                            delete pendingCalendarEvents[targetNumber];
-                        }
-                        if (lastPendingAction && lastPendingAction.type === 'calendar') lastPendingAction = null;
-                        return;
-                    }
-
-                    if (!targetNumber) {
-                        const pendingKeys = Object.keys(pendingContacts).filter(k => pendingContacts[k].step === 'WAITING_FOR_APPROVAL');
-                        if (pendingKeys.length > 0) targetNumber = pendingKeys[pendingKeys.length - 1];
-                    }
-                    
-                    if (targetNumber && pendingContacts[targetNumber]) {
-                        if (decision === 'כן') {
-                            const targetName = pendingContacts[targetNumber].name;
-                            console.log(`מתחיל תהליך שמירה אוטומטית לגוגל עבור: ${targetName} (${targetNumber})`);
-                            await sock.sendMessage(myJid, { text: `מתחיל תהליך שמירה של ${targetName} לאנשי הקשר שלך בגוגל...` });
-                            authorizeAndSaveContact(targetName, targetNumber, myNumberBase);
-                        } else if (decision === 'לא') {
-                            await sock.sendMessage(myJid, { text: `❌ ההודעה טופלה ולא נשמר איש קשר.` });
-                        }
-                        pendingContacts[targetNumber].step = 'DONE';
-                    }
-                    if (lastPendingAction && lastPendingAction.type === 'contact') lastPendingAction = null;
-                } else if (trigger) {
-                    console.log(`[DEBUG] זוהה טריגר "${trigger}". מעביר לטיפול הפונקציה.`);
-                    await handleGeminiCommand(body, trigger, myJid);
-                }
-            }
-            
-            if (!isSentToMe) {
-                const targetNum = remoteJid.split('@')[0];
-                if (!pendingContacts[targetNum]) pendingContacts[targetNum] = { step: 'DONE' };
-            }
-        }
-
-        // נבדוק אם זו הודעת פקודה מפורשת כדי לדלג על היומן
-        // ולא נחסום הודעות טקסט רגילות או מתומללות
-        let skipCalendar = false;
-        if (fromMe && isSentToMe) {
-            // Skip calendar analysis only for explicit commands like "Gemini..." or "yes/no"
-            const isCommand = geminiTriggers.some(t => body.toLowerCase().startsWith(t)) || /^(כן|לא)/.test(body.trim());
-            if (isCommand) skipCalendar = true;
-        }
+        // 1. Handle messages from unknown contacts first and exit the flow.
         if (!isMyContact && !fromMe) {
             console.log(`[DEBUG] זוהתה הודעה מאיש קשר לא שמור: ${senderNumber}`);
             if (!pendingContacts[senderNumber]) {
                 console.log(`[DEBUG] שלב 1: מתחיל אינטראקציה ראשונה מול ${senderNumber}, מבקש שם.`);
-                skipCalendar = true;
                 pendingContacts[senderNumber] = { step: 'WAITING_FOR_NAME', originalMsg: body };
                 await sock.sendMessage(remoteJid, { text: "אינך מופיע באנשי הקשר שלי אנא שלח את שמך המלא על מנת שאשמור אותך באנשי הקשר שלי" }, { quoted: msg });
+                return; // Stop processing this message, wait for the user's name.
             } else if (pendingContacts[senderNumber].step === 'WAITING_FOR_NAME') {
                 const senderName = body;
                 const originalMsg = pendingContacts[senderNumber].originalMsg;
                 console.log(`[DEBUG] שלב 2: התקבל השם '${senderName}' מהמספר ${senderNumber}. שולח בקשת אישור לאמיר...`);
-                skipCalendar = true;
                 pendingContacts[senderNumber].step = 'WAITING_FOR_APPROVAL';
                 pendingContacts[senderNumber].name = senderName;
                 lastPendingAction = { type: 'contact', target: senderNumber };
@@ -380,20 +384,92 @@ async function connectToWhatsApp() {
                     };
                     const tgMsg = `🔔 הודעה ממשתמש לא מוכר בוואטסאפ!\n\nשם: ${senderName}\nמספר: +${senderNumber}\nהודעה: ${originalMsg}\n\nהאם לשמור לאנשי קשר?`;
                     await telegramBot.sendMessage(telegramChatId, tgMsg, options).catch(console.error);
-                    console.log(`[DEBUG] נשלחה בקשת אישור לשמירה בטלגרם עם כפתורים.`);
                 } else {
                     const approvalMessage = `🔔 *הודעה ממשתמש לא מוכר!*\n\n*שם:* ${senderName}\n*הודעה מקורית:* ${originalMsg}\n\nהאם ברצונך לשמור את ${senderName}?\nהשב למטה בטקסט: *"כן"* כדי לשמור, או *"לא"* כדי לבטל.`;
                     await sock.sendMessage(myJid, { text: approvalMessage });
-                    console.log(`[DEBUG] נשלחה הודעת אישור לשמירה למספר של אמיר: ${myJid}`);
                 }
                 
                 await sock.sendMessage(remoteJid, { text: "תודה, שמך נמסר. הודעתך המקורית הועברה בהצלחה לאמיר." }, { quoted: msg });
+                return; // Stop processing this message (which is the name), wait for approval.
             }
         }
 
-        if (!skipCalendar && body && body.trim() !== '') {
+        // 2. Handle commands and replies sent from me to me. If it's a command, process and exit.
+        if (fromMe && isSentToMe) {
+            if (body.startsWith("ג'מיני:") || body.includes("🤖") || body.startsWith("✅") || body.startsWith("❌") || body.startsWith("שגיאה") || body.startsWith("🔔")) return;
+            
+            console.log('[DEBUG] זוהתה הודעה שנשלחה לעצמך (ערוץ פקודות).');
+            const commandBody = body.toLowerCase();
+            const trigger = geminiTriggers.find(t => commandBody.startsWith(t));
+            const bodyExact = body.trim();
+            const startsWithYesNo = body.startsWith('כן ') || body.startsWith('לא ');
+
+            if (trigger) {
+                console.log(`[DEBUG] זוהה טריגר "${trigger}". מעביר לטיפול הפונקציה.`);
+                await handleGeminiCommand(body, trigger, myJid);
+                return;
+            }
+
+            if (bodyExact === 'כן' || bodyExact === 'לא' || startsWithYesNo) {
+                const parts = body.split(' ');
+                const decision = parts[0];
+                let targetNumber = parts[1];
+                let actionType = 'contact';
+                
+                if (targetNumber === 'יומן') { actionType = 'calendar'; targetNumber = null; }
+                else if (!targetNumber && lastPendingAction) { targetNumber = lastPendingAction.target; actionType = lastPendingAction.type; }
+
+                if (actionType === 'calendar') {
+                    if (!targetNumber) {
+                        const pendingKeys = Object.keys(pendingCalendarEvents);
+                        if (pendingKeys.length > 0) targetNumber = pendingKeys[pendingKeys.length - 1];
+                    }
+                    if (targetNumber && pendingCalendarEvents[targetNumber]) {
+                        if (decision === 'כן') {
+                            const eventData = pendingCalendarEvents[targetNumber];
+                            const link = createCalendarLink(eventData.data, eventData.title, eventData.description);
+                            await sock.sendMessage(myJid, { text: `✅ הנה הקישור להוספת הפגישה ליומן (לחץ לפתיחה):\n${link}` });
+                        } else if (decision === 'לא') {
+                            await sock.sendMessage(myJid, { text: `❌ בוטל. לא אצור קישור לפגישה.` });
+                        }
+                        delete pendingCalendarEvents[targetNumber];
+                    }
+                    if (lastPendingAction && lastPendingAction.type === 'calendar') lastPendingAction = null;
+                    return;
+                }
+
+                if (actionType === 'contact') {
+                     if (!targetNumber) {
+                        const pendingKeys = Object.keys(pendingContacts).filter(k => pendingContacts[k].step === 'WAITING_FOR_APPROVAL');
+                        if (pendingKeys.length > 0) targetNumber = pendingKeys[pendingKeys.length - 1];
+                    }
+                    if (targetNumber && pendingContacts[targetNumber]) {
+                        if (decision === 'כן') {
+                            const targetName = pendingContacts[targetNumber].name;
+                            console.log(`מתחיל תהליך שמירה אוטומטית לגוגל עבור: ${targetName} (${targetNumber})`);
+                            await sock.sendMessage(myJid, { text: `מתחיל תהליך שמירה של ${targetName} לאנשי הקשר שלך בגוגל...` });
+                            authorizeAndSaveContact(targetName, targetNumber, myNumberBase);
+                        } else if (decision === 'לא') {
+                            await sock.sendMessage(myJid, { text: `❌ ההודעה טופלה ולא נשמר איש קשר.` });
+                        }
+                        pendingContacts[targetNumber].step = 'DONE';
+                    }
+                    if (lastPendingAction && lastPendingAction.type === 'contact') lastPendingAction = null;
+                    return;
+                }
+            }
+        }
+
+        // 3. Mark outgoing messages to others so we don't treat them as unknown in the future
+        if (fromMe && !isSentToMe) {
+            const targetNum = remoteJid.split('@')[0];
+            if (!pendingContacts[targetNum]) pendingContacts[targetNum] = { step: 'DONE' };
+        }
+
+        // 4. Any message that reaches this point is eligible for calendar analysis.
+        if (body && body.trim() !== '') {
             if (preAnalyzeForCalendar(body)) {
-                const chatName = myContacts[remoteJid] || pushName || senderNumber;
+                const chatName = myContacts[senderJid] || pushName || senderNumber;
                 const eventData = await analyzeForCalendarEvent(body);
                 if (eventData && eventData.hasEvent) {
                     const eventTitle = fromMe ? `פגישה עם ${chatName}` : `${chatName} זימן פגישה`;
@@ -525,7 +601,7 @@ async function analyzeForCalendarEvent(text) {
         נתח את ההודעה הבאה:
         "${text}"
         האם ההודעה מציעה לקבוע פגישה, או מציינת תאריך/שעה ספציפיים (לדוגמה: "מחר ב-10", "ביום שני", "נדבר ב-15:00")?
-        החזר JSON (ללא שום טקסט נוסף):
+        החזר אובייקט JSON (בלבד, ללא שום טקסט נוסף) במבנה הבא:
         {
           "hasEvent": boolean,
           "year": מספר השנה המלא (למשל 2026) או null,
@@ -535,8 +611,9 @@ async function analyzeForCalendarEvent(text) {
           "minute": מספר הדקה (0-59) או null
         }
         שים לב:
-        - אם צוינה רק שעה בלי תאריך, השתמש בתאריך של היום.
-        - אם צוין רק תאריך בלי שעה, הגדר hour ו-minute כ-null.
+        - נתח מונחים יחסיים כמו "מחר", "בעוד יומיים", "יום שני הבא" ביחס לתאריך הנוכחי.
+        - אם צוינה רק שעה בלי תאריך, השתמש בתאריך של היום (אלא אם כן מונח יחסי כמו "מחר" מציין אחרת).
+        - אם צוין רק תאריך בלי שעה, הגדר hour ו-minute כ-null (זה ייחשב אירוע של יום שלם).
         `;
         const result = await model.generateContent(prompt);
         let rawText = result.response.text();
@@ -559,10 +636,10 @@ async function analyzeForCalendarEvent(text) {
 
             if (!isAllDay) {
                 const timeDiff = startDate.getTime() - now.getTime();
-                // ביטול זימון אם הזמן שנקבע הוא פחות משעה מעכשיו (או בעבר)
+                // ביטול זימון אם הזמן שנקבע הוא פחות משעה מהרגע הנוכחי (או בעבר)
                 if (timeDiff < 60 * 60 * 1000) {
                     parsedData.hasEvent = false;
-                    console.log(`[DEBUG] אירוע יומן בוטל - הזמן שזוהה קרוב מדי (פחות משעה) או בעבר.`);
+                    console.log(`[DEBUG] אירוע יומן בוטל - הזמן שזוהה הוא פחות משעה מהרגע הנוכחי או בעבר.`);
                 }
             }
         }
