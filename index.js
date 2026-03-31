@@ -1,6 +1,6 @@
-require('dotenv').config(); // טוען משתני סביבה מקובץ .env
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+require('dotenv').config();
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const pino = require('pino');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { google } = require('googleapis');
 const fs = require('fs');
@@ -14,18 +14,16 @@ const qrcodeGenerator = require('qrcode');
 const SCOPES = ['https://www.googleapis.com/auth/contacts'];
 const TOKEN_PATH = 'token.json';
 
-// --- הגדרות Gemini ---
-// ודא שיצרת קובץ .env עם המפתח שלך תחת השם GEMINI_API_KEY
+// --- Gemini Settings ---
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// --- הגדרות Telegram ---
+// --- Telegram Settings ---
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
 const telegramChatId = process.env.TELEGRAM_CHAT_ID;
 let telegramBot = null;
 if (telegramToken && telegramChatId) {
-    telegramBot = new TelegramBot(telegramToken, {polling: true}); // הפעלנו האזנה כדי שנוכל ללחוץ על כפתורים
+    telegramBot = new TelegramBot(telegramToken, { polling: true });
 
-    // מאזין ללחיצות על כפתורים בטלגרם (Inline Keyboard)
     telegramBot.on('callback_query', (callbackQuery) => {
         const action = callbackQuery.data;
         const chatId = callbackQuery.message.chat.id;
@@ -35,70 +33,65 @@ if (telegramToken && telegramChatId) {
             const targetNumber = action.replace('save_contact_', '');
             if (pendingContacts[targetNumber]) {
                 const targetName = pendingContacts[targetNumber].name;
-                const myNumber = client.info && client.info.wid ? client.info.wid._serialized : null;
-                
+                const myNumber = sock && sock.user ? sock.user.id.split(':')[0] : null;
+
                 if (myNumber) {
                     telegramBot.sendMessage(chatId, `✅ מתחיל תהליך שמירה של ${targetName} לאנשי הקשר בגוגל...`);
-                    authorizeAndSaveContact(targetName, targetNumber, myNumber); // קורא לפונקציה הקיימת ששומרת לגוגל
+                    authorizeAndSaveContact(targetName, targetNumber, myNumber);
                 }
                 pendingContacts[targetNumber].step = 'DONE';
-                telegramBot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId }); // מעלים את הכפתורים אחרי הלחיצה
+                telegramBot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId });
             }
         } else if (action.startsWith('ignore_contact_')) {
             const targetNumber = action.replace('ignore_contact_', '');
             if (pendingContacts[targetNumber]) {
                 pendingContacts[targetNumber].step = 'DONE';
                 telegramBot.sendMessage(chatId, `❌ השמירה בוטלה.`);
-                telegramBot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId }); // מעלים את הכפתורים
+                telegramBot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId });
             }
         }
     });
 }
 
-// מאגר זמני לשמירת מצב השיחה מול מספקים לא מוכרים
+// --- In-memory Stores ---
 const pendingContacts = {};
-const pendingCalendarEvents = {}; // מאגר לאירועי יומן שממתינים לאישור
-let lastPendingAction = null; // מנגנון חכם שזוכר מה הדבר האחרון שהסוכן שאל (יומן או איש קשר)
+const pendingCalendarEvents = {};
+let lastPendingAction = null;
 
-const geminiTriggers = ['גמיני', "ג'ימיני", "ג׳ימיני", "ג'מיני", "ג׳מיני"]; // מילות טריגר להפעלת ג'מיני
+const geminiTriggers = ['גמיני', "ג'ימיני", "ג׳ימיני", "ג'מיני", "ג׳מיני"];
 
-// --- הגדרות שרת Web ---
+// --- Web Server Settings ---
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-const client = new Client({
-    authStrategy: new LocalAuth({ clientId: "main-user" }), // הוספת clientId כדי לתמוך בריבוי משתמשים בעתיד
-    puppeteer: {
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu'
-        ]
-    }
-});
+let sock;
+const CONTACTS_FILE = './contacts.json';
+let myContacts = {};
+if (fs.existsSync(CONTACTS_FILE)) {
+    try {
+        myContacts = JSON.parse(fs.readFileSync(CONTACTS_FILE, 'utf-8'));
+    } catch (e) { console.error('Error loading contacts:', e); }
+}
+const saveContacts = () => fs.writeFileSync(CONTACTS_FILE, JSON.stringify(myContacts));
 
-let agentReadyTimestamp = null;
+// דגל שמונע עיבוד הודעות לפני שהסוכן מוכן ומחובר באופן מלא
+let isAgentReady = false;
 
-// --- פונקציות גוגל (אימות ושמירת אנשי קשר) ---
+// --- Google Functions ---
 function authorizeAndSaveContact(contactName, contactNumber, myNumber) {
     fs.readFile('credentials.json', (err, content) => {
         if (err) {
             console.log('Error loading client secret file:', err);
-            client.sendMessage(myNumber, '❌ שגיאה: לא נמצא קובץ credentials.json. לא ניתן לשמור את איש הקשר לגוגל.');
+            sock.sendMessage(myNumber + '@s.whatsapp.net', { text: '❌ שגיאה: לא נמצא קובץ credentials.json. לא ניתן לשמור את איש הקשר לגוגל.' });
             return;
         }
         const credentials = JSON.parse(content);
-        const {client_secret, client_id, redirect_uris} = credentials.installed;
+        const { client_secret, client_id, redirect_uris } = credentials.installed;
         const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
 
         fs.readFile(TOKEN_PATH, (err, token) => {
             if (err) {
-                // רק אם אין טוקן (בפעם הראשונה), מבקשים מהמשתמש ליצור אותו דרך הטרמינל
                 const authUrl = oAuth2Client.generateAuthUrl({ access_type: 'offline', scope: SCOPES });
                 console.log(`\n\n=== נדרש אימות חד-פעמי מול גוגל! ===`);
                 console.log(`1. היכנס לקישור הבא בדפדפן ואשר את האפליקציה:`);
@@ -123,7 +116,7 @@ function authorizeAndSaveContact(contactName, contactNumber, myNumber) {
 }
 
 function saveToGoogleContacts(auth, contactName, contactNumber, myNumber) {
-    const service = google.people({version: 'v1', auth});
+    const service = google.people({ version: 'v1', auth });
     service.people.createContact({
         requestBody: {
             names: [{ givenName: contactName }],
@@ -132,293 +125,314 @@ function saveToGoogleContacts(auth, contactName, contactNumber, myNumber) {
     }, (err, res) => {
         if (err) {
             console.error('API Error:', err.message);
-            client.sendMessage(myNumber, `❌ שגיאה בשמירת איש הקשר לגוגל.`);
+            sock.sendMessage(myNumber + '@s.whatsapp.net', { text: `❌ שגיאה בשמירת איש הקשר לגוגל.` });
             return;
         }
         console.log(`איש הקשר ${contactName} נשמר בהצלחה לגוגל!`);
-        client.sendMessage(myNumber, `✅ איש הקשר *${contactName}* נשמר בהצלחה לחשבון הגוגל שלך (Google Contacts)! תוך מספר שניות הוא יסתנכרן עם הטלפון.`);
+        sock.sendMessage(myNumber + '@s.whatsapp.net', { text: `✅ איש הקשר *${contactName}* נשמר בהצלחה לחשבון הגוגל שלך (Google Contacts)! תוך מספר שניות הוא יסתנכרן עם הטלפון.` });
     });
 }
 
-// --- כלים עבור Gemini (Function Calling) ---
+// --- Gemini Tools ---
 const tools = [
     {
-      functionDeclarations: [
-        {
-          name: "sendWhatsappMessage",
-          description: "שולח הודעת וואטסאפ לאיש קשר או למספר טלפון.",
-          parameters: {
-            type: "OBJECT",
-            properties: {
-              contactNameOrPhone: {
-                type: "STRING",
-                description: "שם איש הקשר בדיוק כפי שהמשתמש כתב אותו (כולל כינויים כמו 'אשתי האהובה', 'אבא' וכו') או מספר טלפון.",
-              },
-              message: {
-                type: "STRING",
-                description: "תוכן ההודעה לשליחה.",
-              },
+        functionDeclarations: [
+            {
+                name: "sendWhatsappMessage",
+                description: "שולח הודעת וואטסאפ לאיש קשר או למספר טלפון.",
+                parameters: {
+                    type: "OBJECT",
+                    properties: {
+                        contactNameOrPhone: {
+                            type: "STRING",
+                            description: "שם איש הקשר בדיוק כפי שהמשתמש כתב אותו (כולל כינויים כמו 'אשתי האהובה', 'אבא' וכו') או מספר טלפון.",
+                        },
+                        message: {
+                            type: "STRING",
+                            description: "תוכן ההודעה לשליחה.",
+                        },
+                    },
+                    required: ["contactNameOrPhone", "message"],
+                },
             },
-            required: ["contactNameOrPhone", "message"],
-          },
-        },
-      ],
+        ],
     },
 ];
 
-// --- הגדרת נקודות קצה (Endpoints) לשרת ---
+// --- Express Endpoints ---
 app.get('/', (req, res) => {
     res.sendFile(__dirname + '/index.html');
 });
 
-client.on('qr', (qr) => {
-    console.log('QR Code received, sending to web client.');
-    qrcodeGenerator.toDataURL(qr, (err, url) => {
-        io.emit('qr', url); // שולח את ה-QR כ-URL של תמונה לדפדפן
+// --- Main WhatsApp Connection Logic ---
+async function connectToWhatsApp() {
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    
+    // שליפת הגרסה העדכנית ביותר של וואטסאפ כדי למנוע דחיית חיבור
+    const { version } = await fetchLatestBaileysVersion();
+    
+    sock = makeWASocket({
+        version,
+        auth: state,
+        printQRInTerminal: false,
+        logger: pino({ level: 'silent' }),
+        browser: ['WhatsApp Agent', 'Chrome', '1.0.0'],
+        keepAliveIntervalMs: 30000 // שליחת אות חיים כל 30 שניות למניעת ניתוקים
     });
-});
+    
+    // האזנה ושמירה של אנשי קשר לקובץ מקומי קליל
+    sock.ev.on('contacts.upsert', (contacts) => {
+        let changed = false;
+        for (const contact of contacts) {
+            if (contact.name || contact.notify) {
+                myContacts[contact.id] = contact.name || contact.notify;
+                changed = true;
+            }
+        }
+        if (changed) saveContacts();
+    });
+    sock.ev.on('contacts.update', (updates) => {
+        let changed = false;
+        for (const update of updates) {
+            if (update.name || update.notify) {
+                myContacts[update.id] = update.name || update.notify;
+                changed = true;
+            }
+        }
+        if (changed) saveContacts();
+    });
+    sock.ev.on('creds.update', saveCreds);
 
-client.on('ready', () => {
-    agentReadyTimestamp = Math.floor(Date.now() / 1000);
-    console.log('הסוכן התחבר לוואטסאפ בהצלחה וממתין להודעות!');
-    io.emit('ready'); // מודיע לדפדפן שהחיבור הצליח
-});
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        if (qr) {
+            console.log('QR Code received, sending to web client.');
+            qrcodeGenerator.toDataURL(qr, (err, url) => {
+                io.emit('qr', url);
+            });
+        }
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log('Client disconnected due to error:', lastDisconnect.error?.message || lastDisconnect.error);
+            console.log('Reconnecting in 3 seconds:', shouldReconnect);
+            io.emit('disconnected');
+            if (shouldReconnect) setTimeout(connectToWhatsApp, 3000); // הוספנו השהיה של 3 שניות למניעת לולאה אינסופית
+        } else if (connection === 'open') {
+            isAgentReady = true; // הסוכן מוכן לקבל הודעות חדשות
+            console.log('הסוכן התחבר לוואטסאפ בהצלחה וממתין להודעות!');
+            io.emit('ready');
+        }
+    });
 
-client.on('disconnected', (reason) => {
-    console.log('Client was logged out', reason);
-    io.emit('disconnected');
-});
+    sock.ev.on('messages.upsert', async m => {
+        if (m.type !== 'notify') return;
+        // התעלמות מכל הודעה שהגיעה לפני שהחיבור הושלם
+        if (!isAgentReady) return;
 
-client.on('message_create', async msg => { // שינוי חשוב: מאזין גם להודעות שאתה שולח
-    // התעלמות מהודעות ישנות שהתקבלו לפני שהסוכן הופעל
-    if (agentReadyTimestamp && msg.timestamp < agentReadyTimestamp) return;
+        const msg = m.messages[0];
+        if (!msg.message) return;
 
-    // התעלמות מעדכוני סטטוס, הודעות מערכת, וכתובות פנימיות של וואטסאפ (כמו @lid)
-    // נוספה התעלמות מהודעות מערכת על שינוי מפתח הצפנה (e2e_notification, protocol וכו')
-    if (msg.isStatus || msg.from === 'status@broadcast' || msg.from.includes('@lid') || msg.to.includes('@lid') || msg.type === 'e2e_notification' || msg.type === 'protocol' || msg.type === 'notification_template') return;
+        const remoteJid = msg.key.remoteJid;
+        const fromMe = msg.key.fromMe;
+        
+        // התעלמות מקבוצות, סטטוסים ומזהי מערכת פנימיים (@lid)
+        if (remoteJid.endsWith('@g.us') || remoteJid.endsWith('@lid') || remoteJid === 'status@broadcast') return;
 
-    // התעלמות מוחלטת מהודעות של קבוצות (זיהוי לפי סיומת @g.us)
-    if (msg.from.endsWith('@g.us') || msg.to.endsWith('@g.us')) return;
+        const messageType = Object.keys(msg.message)[0];
+        if (messageType === 'protocolMessage' || messageType === 'senderKeyDistributionMessage') return;
 
-    // התעלמות מהודעות ריקות ללא טקסט וללא מדיה
-    if ((!msg.body || msg.body.trim() === '') && !msg.hasMedia) return;
+        const myNumberBase = sock.user.id.split(':')[0];
+        const myJid = `${myNumberBase}@s.whatsapp.net`;
+        const senderNumber = remoteJid.split('@')[0];
+        const isSentToMe = remoteJid.startsWith(myNumberBase);
 
-    // גיבוי למניעת שגיאות: אם אין טקסט אבל יש מדיה, נגדיר כמחרוזת ריקה
-    msg.body = msg.body || '';
+        let body = '';
+        if (messageType === 'conversation') body = msg.message.conversation;
+        else if (messageType === 'extendedTextMessage') body = msg.message.extendedTextMessage.text;
+        
+        const pushName = msg.pushName || senderNumber;
+        const isMyContact = !!myContacts[remoteJid];
 
-    const contact = await msg.getContact();
-    // myNumber מזהה את המספר שמחובר כעת לוואטסאפ (שלך)
-    const myNumber = client.info.wid._serialized;
-    const senderNumber = contact.number;
+        if ((!body || body.trim() === '') && messageType !== 'audioMessage') return;
 
-    // נוסיף לוג כדי לראות כל הודעה שנכנסת
-    console.log(`[DEBUG] התקבלה הודעה מ: ${msg.from}, אל: ${msg.to}, תוכן: "${msg.body}"`);
+        console.log(`[DEBUG] התקבלה הודעה מ: ${remoteJid}, אל: ${fromMe ? remoteJid : myJid}, תוכן: "${body}"`);
 
-    // --- טיפול בהודעות קוליות (Push To Talk) ---
-    if (msg.hasMedia && msg.type === 'ptt') {
-        try {
-            const media = await msg.downloadMedia();
-            if (media) {
-                const senderName = msg.from === myNumber ? 'אמיר' : (contact.name || contact.number);
-                console.log(`[DEBUG] מתמלל הודעה קולית מ-${senderName}`);
-                const transcription = await transcribeAudio(media);
-                if (transcription) {
-                    // שליחה לטלגרם בלבד - ללא הודעות בוואטסאפ או פקודות לג'מיני
-                    if (telegramBot) {
-                        await telegramBot.sendMessage(telegramChatId, `${senderName} - אמר : "${transcription.trim()}"`);
+        if (messageType === 'audioMessage' && msg.message.audioMessage.ptt) {
+            try {
+                const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }) });
+                if (buffer) {
+                    const senderName = fromMe ? 'אמיר' : (myContacts[remoteJid] || pushName);
+                    console.log(`[DEBUG] מתמלל הודעה קולית מ-${senderName}`);
+                    const media = { data: buffer.toString('base64'), mimetype: msg.message.audioMessage.mimetype };
+                    const transcription = await transcribeAudio(media);
+                    if (transcription) {
+                        // שולח את התמלול לטלגרם רק אם ההודעה הגיעה ממישהו אחר (לא ממך)
+                        if (telegramBot && !fromMe) {
+                            await telegramBot.sendMessage(telegramChatId, `${senderName} - אמר : "${transcription.trim()}"`).catch(console.error);
+                        }
+                        body = transcription.trim();
                     }
-                    // מעדכנים את גוף ההודעה כדי לאפשר זיהוי תאריכים בהמשך
-                    msg.body = transcription.trim();
                 }
-            }
-        } catch (e) { console.error("שגיאה בטיפול בהודעה קולית:", e); return; }
-        // לא עושים return כללי כדי שהטקסט המתומלל ימשיך ללוגיקת זיהוי יומן בסוף!
-    }
+            } catch (e) { console.error("שגיאה בטיפול בהודעה קולית:", e); return; }
+        }
 
-    // ----- לוגיקה להודעות שאתה שולח לעצמך (פקודות לסוכן) -----
-    // התנאי בודק שההודעה נשלחה ממך אל עצמך, כדי שהסוכן לא יגיב להודעות שאתה שולח לאחרים
-    if (msg.from === myNumber) {
-        // אם ההודעה ממך, בדוק אם היא נשלחה אליך (ערוץ פקודות)
-        if (msg.to === myNumber) {
-            // הגנה מפני לולאה אינסופית: מתעלם מהודעות שהסוכן עצמו שולח חזרה
-            if (msg.body.startsWith("ג'מיני:") || 
-                msg.body.includes("🤖") || 
-                msg.body.startsWith("✅") || 
-                msg.body.startsWith("❌") || 
-                msg.body.startsWith("שגיאה") ||
-                msg.body.startsWith("🔔")) {
-                return;
-            }
+        if (fromMe) {
+            if (isSentToMe) {
+                if (body.startsWith("ג'מיני:") || body.includes("🤖") || body.startsWith("✅") || body.startsWith("❌") || body.startsWith("שגיאה") || body.startsWith("🔔")) return;
+                console.log('[DEBUG] זוהתה הודעה שנשלחה לעצמך (ערוץ פקודות).');
+                
+                const commandBody = body.toLowerCase();
+                const trigger = geminiTriggers.find(t => commandBody.startsWith(t));
+                const bodyExact = body.trim();
+                const startsWithYesNo = body.startsWith('כן ') || body.startsWith('לא ');
 
-            console.log('[DEBUG] זוהתה הודעה שנשלחה לעצמך (ערוץ פקודות).');
+                if (bodyExact === 'כן' || bodyExact === 'לא' || startsWithYesNo) {
+                    const parts = body.split(' ');
+                    const decision = parts[0];
+                    let targetNumber = parts[1];
+                    let actionType = 'contact';
+                    
+                    if (targetNumber === 'יומן') { actionType = 'calendar'; targetNumber = null; }
+                    else if (!targetNumber && lastPendingAction) { targetNumber = lastPendingAction.target; actionType = lastPendingAction.type; }
 
-            const commandBody = msg.body.toLowerCase();
-            const trigger = geminiTriggers.find(t => commandBody.startsWith(t));
+                    if (actionType === 'calendar') {
+                        if (!targetNumber) {
+                            const pendingKeys = Object.keys(pendingCalendarEvents);
+                            if (pendingKeys.length > 0) targetNumber = pendingKeys[pendingKeys.length - 1];
+                        }
+                        if (targetNumber && pendingCalendarEvents[targetNumber]) {
+                            if (decision === 'כן') {
+                                const eventData = pendingCalendarEvents[targetNumber];
+                                const link = createCalendarLink(eventData.data, eventData.title, eventData.description);
+                                await sock.sendMessage(myJid, { text: `✅ הנה הקישור להוספת הפגישה ליומן (לחץ לפתיחה):\n${link}` });
+                            } else if (decision === 'לא') {
+                                await sock.sendMessage(myJid, { text: `❌ בוטל. לא אצור קישור לפגישה.` });
+                            }
+                            delete pendingCalendarEvents[targetNumber];
+                        }
+                        if (lastPendingAction && lastPendingAction.type === 'calendar') lastPendingAction = null;
+                        return;
+                    }
 
-            const bodyExact = msg.body.trim();
-            const startsWithYesNo = msg.body.startsWith('כן ') || msg.body.startsWith('לא ');
-
-            if (bodyExact === 'כן' || bodyExact === 'לא' || startsWithYesNo) {
-                const parts = msg.body.split(' ');
-                const decision = parts[0];
-                let targetNumber = parts[1];
-
-                let actionType = 'contact'; // ברירת מחדל
-                if (targetNumber === 'יומן') {
-                    actionType = 'calendar';
-                    targetNumber = null;
-                } else if (!targetNumber && lastPendingAction) {
-                    // אם ענית רק "כן", נשתמש בפעולה האחרונה שהסוכן ביקש עליה אישור
-                    targetNumber = lastPendingAction.target;
-                    actionType = lastPendingAction.type;
-                }
-
-                // --- לוגיקת יומן ---
-                if (actionType === 'calendar') {
                     if (!targetNumber) {
-                        const pendingKeys = Object.keys(pendingCalendarEvents);
+                        const pendingKeys = Object.keys(pendingContacts).filter(k => pendingContacts[k].step === 'WAITING_FOR_APPROVAL');
                         if (pendingKeys.length > 0) targetNumber = pendingKeys[pendingKeys.length - 1];
                     }
-
-                    if (targetNumber && pendingCalendarEvents[targetNumber]) {
+                    
+                    if (targetNumber && pendingContacts[targetNumber]) {
                         if (decision === 'כן') {
-                            const eventData = pendingCalendarEvents[targetNumber];
-                            const link = createCalendarLink(eventData.data, eventData.title, eventData.description);
-                            await client.sendMessage(myNumber, `✅ הנה הקישור להוספת הפגישה ליומן (לחץ לפתיחה):\n${link}`);
+                            const targetName = pendingContacts[targetNumber].name;
+                            console.log(`מתחיל תהליך שמירה אוטומטית לגוגל עבור: ${targetName} (${targetNumber})`);
+                            await sock.sendMessage(myJid, { text: `מתחיל תהליך שמירה של ${targetName} לאנשי הקשר שלך בגוגל...` });
+                            authorizeAndSaveContact(targetName, targetNumber, myNumberBase);
                         } else if (decision === 'לא') {
-                            await client.sendMessage(myNumber, `❌ בוטל. לא אצור קישור לפגישה.`);
+                            await sock.sendMessage(myJid, { text: `❌ ההודעה טופלה ולא נשמר איש קשר.` });
                         }
-                        delete pendingCalendarEvents[targetNumber];
+                        pendingContacts[targetNumber].step = 'DONE';
                     }
-                    if (lastPendingAction && lastPendingAction.type === 'calendar') lastPendingAction = null;
-                    return; // מסיימים כאן ללוגיקת היומן
+                    if (lastPendingAction && lastPendingAction.type === 'contact') lastPendingAction = null;
+                } else if (trigger) {
+                    console.log(`[DEBUG] זוהה טריגר "${trigger}". מעביר לטיפול הפונקציה.`);
+                    await handleGeminiCommand(body, trigger, myJid);
                 }
-
-                // --- לוגיקת שמירת איש קשר (הקיימת) ---
-                if (!targetNumber) { // גיבוי אם אין lastPendingAction
-                    const pendingKeys = Object.keys(pendingContacts).filter(k => pendingContacts[k].step === 'WAITING_FOR_APPROVAL');
-                    if (pendingKeys.length > 0) {
-                        targetNumber = pendingKeys[pendingKeys.length - 1]; // לוקח את האחרון ברשימה
-                    }
-                }
-
-                if (targetNumber && pendingContacts[targetNumber]) {
-                    if (decision === 'כן') {
-                        const targetName = pendingContacts[targetNumber].name;
-                        
-                        console.log(`מתחיל תהליך שמירה אוטומטית לגוגל עבור: ${targetName} (${targetNumber})`);
-                        await client.sendMessage(myNumber, `מתחיל תהליך שמירה של ${targetName} לאנשי הקשר שלך בגוגל...`);
-                        
-                        // קריאה לפונקציה החדשה ששומרת לגוגל
-                        authorizeAndSaveContact(targetName, targetNumber, myNumber);
-                        
-                    } else if (decision === 'לא') {
-                        console.log(`לא שומר איש קשר: ${targetNumber}`);
-                        await client.sendMessage(myNumber, `❌ ההודעה טופלה ולא נשמר איש קשר.`);
-                    }
-                    // סימון שהשיחה טופלה במקום מחיקה, כדי שההודעה האוטומטית לא תישלח לו שוב בהמשך
-                    pendingContacts[targetNumber].step = 'DONE';
-                }
-                if (lastPendingAction && lastPendingAction.type === 'contact') lastPendingAction = null;
-            } else if (trigger) {
-                console.log(`[DEBUG] זוהה טריגר "${trigger}". מעביר לטיפול הפונקציה.`);
-                await handleGeminiCommand(msg, trigger);
+            }
+            
+            if (!isSentToMe) {
+                const targetNum = remoteJid.split('@')[0];
+                if (!pendingContacts[targetNum]) pendingContacts[targetNum] = { step: 'DONE' };
             }
         }
-        
-        // הגנה נוספת: אם אמיר שולח הודעה יזומה למספר כלשהו, נסמן אותו במאגר 
-        // כדי שאם הוא יענה (והוא לא שמור באנשי הקשר), הסוכן לא ישגע אותו בבקשת שם
-        if (msg.to !== myNumber) {
-            const targetNum = msg.to.split('@')[0];
-            if (!pendingContacts[targetNum]) pendingContacts[targetNum] = { step: 'DONE' };
+
+        // נבדוק אם זו הודעת פקודה מפורשת כדי לדלג על היומן
+        // ולא נחסום הודעות טקסט רגילות או מתומללות
+        let skipCalendar = false;
+        if (fromMe && isSentToMe) {
+            // Skip calendar analysis only for explicit commands like "Gemini..." or "yes/no"
+            const isCommand = geminiTriggers.some(t => body.toLowerCase().startsWith(t)) || /^(כן|לא)/.test(body.trim());
+            if (isCommand) skipCalendar = true;
         }
+        if (!isMyContact && !fromMe) {
+            console.log(`[DEBUG] זוהתה הודעה מאיש קשר לא שמור: ${senderNumber}`);
+            if (!pendingContacts[senderNumber]) {
+                console.log(`[DEBUG] שלב 1: מתחיל אינטראקציה ראשונה מול ${senderNumber}, מבקש שם.`);
+                skipCalendar = true;
+                pendingContacts[senderNumber] = { step: 'WAITING_FOR_NAME', originalMsg: body };
+                await sock.sendMessage(remoteJid, { text: "אינך מופיע באנשי הקשר שלי אנא שלח את שמך המלא על מנת שאשמור אותך באנשי הקשר שלי" }, { quoted: msg });
+            } else if (pendingContacts[senderNumber].step === 'WAITING_FOR_NAME') {
+                const senderName = body;
+                const originalMsg = pendingContacts[senderNumber].originalMsg;
+                console.log(`[DEBUG] שלב 2: התקבל השם '${senderName}' מהמספר ${senderNumber}. שולח בקשת אישור לאמיר...`);
+                skipCalendar = true;
+                pendingContacts[senderNumber].step = 'WAITING_FOR_APPROVAL';
+                pendingContacts[senderNumber].name = senderName;
+                lastPendingAction = { type: 'contact', target: senderNumber };
 
-        // חשוב: אנחנו עוצרים כאן כדי שהסוכן לא ינתח הודעות שאתה שולח לאנשים אחרים
-        return;
-    }
-
-    // ----- לוגיקה לאנשי קשר לא שמורים (לא מוכרים) -----
-    let skipCalendar = false;
-    if (!contact.isMyContact) {
-        console.log(`[DEBUG] זוהתה הודעה מאיש קשר לא שמור: ${senderNumber}`);
-        if (!pendingContacts[senderNumber]) {
-            // שלב 1: איש קשר חדש לחלוטין שמייצר אינטראקציה ראשונה
-            console.log(`[DEBUG] שלב 1: מתחיל אינטראקציה ראשונה מול ${senderNumber}, מבקש שם.`);
-            skipCalendar = true; // מדלגים על זיהוי יומן כי אנחנו ממתינים לשם
-            pendingContacts[senderNumber] = {
-                step: 'WAITING_FOR_NAME',
-                originalMsg: msg.body
-            };
-            await msg.reply("אינך מופיע באנשי הקשר שלי אנא שלח את שמך המלא על מנת שאשמור אותך באנשי הקשר שלי"); // נשארה רק ההודעה המעודכנת
-            
-        } else if (pendingContacts[senderNumber].step === 'WAITING_FOR_NAME') {
-            // שלב 2: התקבל שם משתמש, כעת הסוכן מעביר הכל לאמיר
-            const senderName = msg.body;
-            const originalMsg = pendingContacts[senderNumber].originalMsg;
-            console.log(`[DEBUG] שלב 2: התקבל השם '${senderName}' מהמספר ${senderNumber}. שולח בקשת אישור לאמיר...`);
-            
-            skipCalendar = true; // עדיין לא לנתח הודעה זו ליומן
-            pendingContacts[senderNumber].step = 'WAITING_FOR_APPROVAL';
-            pendingContacts[senderNumber].name = senderName;
-            lastPendingAction = { type: 'contact', target: senderNumber }; // מעדכנים את ההמתנה
-
-            if (telegramBot) {
-                const options = {
-                    parse_mode: 'Markdown',
-                    reply_markup: {
-                        inline_keyboard: [
-                            [
-                                { text: '✅ שמור לאנשי קשר', callback_data: `save_contact_${senderNumber}` },
-                                { text: '❌ התעלם', callback_data: `ignore_contact_${senderNumber}` }
+                if (telegramBot) {
+                    const options = {
+                        reply_markup: {
+                            inline_keyboard: [
+                                [
+                                    { text: '✅ שמור לאנשי קשר', callback_data: `save_contact_${senderNumber}` },
+                                    { text: '❌ התעלם', callback_data: `ignore_contact_${senderNumber}` }
+                                ]
                             ]
-                        ]
-                    }
-                };
-                const tgMsg = `🔔 *הודעה ממשתמש לא מוכר בוואטסאפ!*\n\n*שם:* ${senderName}\n*מספר:* +${senderNumber}\n*הודעה:* ${originalMsg}\n\nהאם לשמור לאנשי קשר?`;
-                await telegramBot.sendMessage(telegramChatId, tgMsg, options);
-                console.log(`[DEBUG] נשלחה בקשת אישור לשמירה בטלגרם עם כפתורים.`);
-            } else {
-                // גיבוי לוואטסאפ במקרה שאין טלגרם
-                const approvalMessage = `🔔 *הודעה ממשתמש לא מוכר!*\n\n*שם:* ${senderName}\n*הודעה מקורית:* ${originalMsg}\n\nהאם ברצונך לשמור את ${senderName}?\nהשב למטה בטקסט: *"כן"* כדי לשמור, או *"לא"* כדי לבטל.`;
-                await client.sendMessage(myNumber, approvalMessage);
-                console.log(`[DEBUG] נשלחה הודעת אישור לשמירה למספר של אמיר: ${myNumber}`);
-            }
-            
-            await msg.reply("תודה, שמך נמסר. הודעתך המקורית הועברה בהצלחה לאמיר.");
-        }
-    }
-
-    // --- זיהוי אוטומטי של תאריכים ופגישות ליומן ---
-    if (!skipCalendar && msg.body && msg.body.trim() !== '') {
-        // שלב מקדים: בודקים אם יש סיכוי בכלל שיש פה תאריך כדי לא להעמיס על ה-API
-        if (preAnalyzeForCalendar(msg.body)) {
-            const senderName = contact.name || senderNumber;
-            const eventData = await analyzeForCalendarEvent(msg.body);
-            if (eventData && eventData.hasEvent) {
-                pendingCalendarEvents[senderNumber] = {
-                    data: eventData,
-                    title: `${senderName} זימן פגישה`,
-                    description: msg.body
-                };
-                lastPendingAction = { type: 'calendar', target: senderNumber };
+                        }
+                    };
+                    const tgMsg = `🔔 הודעה ממשתמש לא מוכר בוואטסאפ!\n\nשם: ${senderName}\nמספר: +${senderNumber}\nהודעה: ${originalMsg}\n\nהאם לשמור לאנשי קשר?`;
+                    await telegramBot.sendMessage(telegramChatId, tgMsg, options).catch(console.error);
+                    console.log(`[DEBUG] נשלחה בקשת אישור לשמירה בטלגרם עם כפתורים.`);
+                } else {
+                    const approvalMessage = `🔔 *הודעה ממשתמש לא מוכר!*\n\n*שם:* ${senderName}\n*הודעה מקורית:* ${originalMsg}\n\nהאם ברצונך לשמור את ${senderName}?\nהשב למטה בטקסט: *"כן"* כדי לשמור, או *"לא"* כדי לבטל.`;
+                    await sock.sendMessage(myJid, { text: approvalMessage });
+                    console.log(`[DEBUG] נשלחה הודעת אישור לשמירה למספר של אמיר: ${myJid}`);
+                }
                 
-                const askMsg = `📅 *זיהוי אירוע ליומן!*\n\nהודעה מ-${senderName}:\n"${msg.body}"\n\nהאם תרצה לקבוע פגישה ביומן לאותו מועד?\nהשב *"כן"* כדי לקבל קישור להוספה מהירה ליומן גוגל, או *"לא"* כדי להתעלם.`;
-                await client.sendMessage(myNumber, askMsg);
+                await sock.sendMessage(remoteJid, { text: "תודה, שמך נמסר. הודעתך המקורית הועברה בהצלחה לאמיר." }, { quoted: msg });
             }
         }
-    }
-});
 
-async function handleGeminiCommand(msg, trigger) {
-    // מנקה את הפקודה מהטריגר בצורה חכמה
-    const prompt = msg.body.substring(trigger.length).replace(/^,/, '').trim(); // מסיר את הטריגר, פסיק אם קיים, ורווחים
+        if (!skipCalendar && body && body.trim() !== '') {
+            if (preAnalyzeForCalendar(body)) {
+                const chatName = myContacts[remoteJid] || pushName || senderNumber;
+                const eventData = await analyzeForCalendarEvent(body);
+                if (eventData && eventData.hasEvent) {
+                    const eventTitle = fromMe ? `פגישה עם ${chatName}` : `${chatName} זימן פגישה`;
+                    pendingCalendarEvents[senderNumber] = { data: eventData, title: eventTitle, description: body };
+                    lastPendingAction = { type: 'calendar', target: senderNumber };
+                    
+                    if (telegramBot) {
+                        const options = {
+                            reply_markup: {
+                                inline_keyboard: [
+                                    [
+                                        { text: '✅ הוסף ליומן', callback_data: `calendar_yes_${senderNumber}` },
+                                        { text: '❌ התעלם', callback_data: `calendar_no_${senderNumber}` }
+                                    ]
+                                ]
+                            }
+                        };
+                        const directionText = fromMe ? `ששלחת ל-${chatName}` : `מ-${chatName}`;
+                        const tgMsg = `📅 זיהוי אירוע ליומן!\n\nהודעה ${directionText}:\n"${body}"\n\nהאם תרצה לקבוע פגישה ביומן לאותו מועד?`;
+                        await telegramBot.sendMessage(telegramChatId, tgMsg, options).catch(console.error);
+                    } else {
+                        const directionText = fromMe ? `ששלחת ל-${chatName}` : `מ-${chatName}`;
+                        const askMsg = `📅 *זיהוי אירוע ליומן!*\n\nהודעה ${directionText}:\n"${body}"\n\nהאם תרצה לקבוע פגישה ביומן לאותו מועד?\nהשב *"כן"* כדי לקבל קישור להוספה מהירה ליומן גוגל, או *"לא"* כדי להתעלם.`;
+                        await sock.sendMessage(myJid, { text: askMsg });
+                    }
+                }
+            }
+        }
+    });
+}
 
+async function handleGeminiCommand(body, trigger, jid) {
+    const prompt = body.substring(trigger.length).replace(/^,/, '').trim();
     console.log(`מעביר לג'מיני את הפקודה: "${prompt}"`);
-    await msg.reply(`מעבד את בקשתך לג'מיני... 🤖`);
+    await sock.sendMessage(jid, { text: `מעבד את בקשתך לג'מיני... 🤖` });
 
     try {
-        const model = genAI.getGenerativeModel({ 
-            model: "gemini-2.5-flash", 
+        const model = genAI.getGenerativeModel({
+            model: "gemini-2.5-flash",
             tools: tools,
             systemInstruction: "אתה עוזר חכם בוואטסאפ. כשהמשתמש מבקש לשלוח הודעה למישהו (גם אם השם נשמע כמו כינוי כגון 'אשתי האהובה', 'אחי' וכו'), אל תשאל שאלות הבהרה! פשוט הפעל את הפונקציה sendWhatsappMessage והעבר אליה את השם המדויק שהמשתמש כתב."
         });
@@ -431,58 +445,51 @@ async function handleGeminiCommand(msg, trigger) {
                 const { contactNameOrPhone, message } = call.args;
                 const success = await sendMessageToContact(contactNameOrPhone, message);
                 if (success) {
-                    await client.sendMessage(msg.from, `✅ הודעה נשלחה בהצלחה אל: ${contactNameOrPhone}`);
+                    await sock.sendMessage(jid, { text: `✅ הודעה נשלחה בהצלחה אל: ${contactNameOrPhone}` });
                 } else {
-                    await client.sendMessage(msg.from, `❌ לא נמצא איש קשר שמור בשם '${contactNameOrPhone}'. לא ניתן היה לשלוח את ההודעה.`);
+                    await sock.sendMessage(jid, { text: `❌ לא נמצא איש קשר שמור בשם '${contactNameOrPhone}'. לא ניתן היה לשלוח את ההודעה.` });
                 }
             }
         } else {
-            // אם ג'מיני לא קרא לפונקציה, נשלח את תגובת הטקסט שלו
             const textResponse = result.response.text();
-            await client.sendMessage(msg.from, `ג'מיני:\n${textResponse}`);
+            await sock.sendMessage(jid, { text: `ג'מיני:\n${textResponse}` });
         }
     } catch (e) {
         console.error("שגיאה בתקשורת עם ג'מיני:", e);
-        await client.sendMessage(msg.from, `שגיאה בעיבוד הבקשה מול ג'מיני.`);
+        await sock.sendMessage(jid, { text: `שגיאה בעיבוד הבקשה מול ג'מיני.` });
     }
 }
 
 async function sendMessageToContact(contactNameOrPhone, message) {
-    // בודק אם הקלט הוא מספר טלפון (מאפשר רווחים, מקפים ופלוס)
     const isPhoneNumber = /^[\+\d\s\-]+$/.test(contactNameOrPhone);
-    
+
     if (isPhoneNumber) {
         let cleanNumber = contactNameOrPhone.replace(/\D/g, '');
         if (cleanNumber.startsWith('0')) {
-            cleanNumber = '972' + cleanNumber.substring(1); // המרה לקידומת בינלאומית
+            cleanNumber = '972' + cleanNumber.substring(1);
         }
-        const numberId = `${cleanNumber}@c.us`;
-        await client.sendMessage(numberId, message);
+        await sock.sendMessage(`${cleanNumber}@s.whatsapp.net`, { text: message });
         return true;
     }
 
-    // אם זה שם, מחפשים את איש הקשר (חיפוש גמיש - מכיל את המילה)
-    const contacts = await client.getContacts();
     const searchName = contactNameOrPhone.toLowerCase().trim();
-    
-    const targetContact = contacts.find(c => {
-        // מתעלם מקבוצות, מאנשים שלא שמורים, ומאנשי קשר ללא שם
-        if (c.isGroup || !c.isMyContact || !c.name) return false;
-        // בודק אם השם המבוקש מוכל בשם השמור (למשל "עומריקו" ימצא את "עומריקו מהעבודה")
-        return c.name.toLowerCase().includes(searchName);
+
+    const targetContactId = Object.keys(myContacts).find(id => {
+        if (id.endsWith('@g.us')) return false;
+        const name = myContacts[id];
+        return name && name.toLowerCase().includes(searchName);
     });
 
-    if (targetContact) {
-        await client.sendMessage(targetContact.id._serialized, message);
+    if (targetContactId) {
+        await sock.sendMessage(targetContactId, { text: message });
         return true;
     }
 
-    return false; // איש הקשר לא נמצא
+    return false;
 }
 
 async function transcribeAudio(media) {
     try {
-        // חזרנו למודל ה-Flash המהיר והזמין בוודאות בחשבון שלך
         const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
         const prompt = "תמלל את ההודעה הקולית הבאה בעברית בצורה מדויקת. אל תוסיף הקדמות או תוספות, רק את המלל שנאמר.";
         const audioPart = {
@@ -499,9 +506,8 @@ async function transcribeAudio(media) {
     }
 }
 
-// --- פונקציות עזר לזיהוי וליצירת קישור יומן ---
+// --- Calendar Helper Functions ---
 function preAnalyzeForCalendar(text) {
-    // בודק מילות מפתח ודפוסים נפוצים לפני ששולחים ל-API היקר
     const keywords = ['מחר', 'היום', 'שעה', 'ב-', 'בבוקר', 'בערב', 'בצהריים', 'יום', 'שבוע', 'פגישה'];
     const regex = new RegExp(keywords.join('|') + '|\\d{1,2}[\\/\\.:]\\d{1,2}', 'i');
     return regex.test(text);
@@ -535,8 +541,34 @@ async function analyzeForCalendarEvent(text) {
         const result = await model.generateContent(prompt);
         let rawText = result.response.text();
         rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
-        return JSON.parse(rawText);
-    } catch(e) {
+        
+        const parsedData = JSON.parse(rawText);
+        
+        if (parsedData.hasEvent) {
+            let startDate = new Date();
+            let isAllDay = false;
+
+            if (parsedData.year && parsedData.month && parsedData.day) {
+                startDate.setFullYear(parsedData.year, parsedData.month - 1, parsedData.day);
+            }
+            if (parsedData.hour !== null && parsedData.minute !== null) {
+                startDate.setHours(parsedData.hour, parsedData.minute, 0, 0);
+            } else {
+                isAllDay = true;
+            }
+
+            if (!isAllDay) {
+                const timeDiff = startDate.getTime() - now.getTime();
+                // ביטול זימון אם הזמן שנקבע הוא פחות משעה מעכשיו (או בעבר)
+                if (timeDiff < 60 * 60 * 1000) {
+                    parsedData.hasEvent = false;
+                    console.log(`[DEBUG] אירוע יומן בוטל - הזמן שזוהה קרוב מדי (פחות משעה) או בעבר.`);
+                }
+            }
+        }
+        
+        return parsedData;
+    } catch (e) {
         console.error("שגיאה בניתוח יומן:", e);
         return { hasEvent: false };
     }
@@ -557,11 +589,11 @@ function createCalendarLink(eventData, title, description) {
 
     let endDate = new Date(startDate);
     if (isAllDay) endDate.setDate(endDate.getDate() + 1);
-    else endDate.setHours(endDate.getHours() + 1); // פגישה סטנדרטית של שעה
+    else endDate.setHours(endDate.getHours() + 1);
 
     const format = (d, allday) => {
         const pad = n => n.toString().padStart(2, '0');
-        const str = `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}`;
+        const str = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
         return allday ? str : `${str}T${pad(d.getHours())}${pad(d.getMinutes())}00`;
     };
 
@@ -569,7 +601,7 @@ function createCalendarLink(eventData, title, description) {
     return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&details=${encodeURIComponent(description)}&dates=${dates}`;
 }
 
-// --- הפעלת השרת והסוכן ---
+// --- Start Server and Agent ---
 connectToWhatsApp();
 
 server.listen(3000, () => {
