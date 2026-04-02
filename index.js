@@ -103,6 +103,7 @@ const saveContacts = () => fs.writeFileSync(CONTACTS_FILE, JSON.stringify(myCont
 
 // דגל שמונע עיבוד הודעות לפני שהסוכן מוכן ומחובר באופן מלא
 let isAgentReady = false;
+let isReconnecting = false; // דגל שמציין שחיבור מחדש מוצע או מתבצע
 
 // --- Google Functions ---
 function authorizeAndSaveContact(contactName, contactNumber, myNumber) {
@@ -229,7 +230,7 @@ async function connectToWhatsApp() {
     });
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
         if (qr) {
             console.log('QR Code received, sending to web client.');
@@ -239,15 +240,43 @@ async function connectToWhatsApp() {
         }
         if (connection === 'close') {
             isAgentReady = false; // איפוס הדגל בעת ניתוק
-            const statusCode = (lastDisconnect.error)?.output?.statusCode;
-            // Don't reconnect on logout or if another client took over
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== DisconnectReason.streamReplaced;
-            console.error('Connection closed due to:', lastDisconnect.error, `, reconnecting: ${shouldReconnect}`);
+            const statusCode = lastDisconnect.error?.output?.statusCode;
+            let shouldReconnect = true;
+
+            let reason = 'an unknown error';
+            if (statusCode === DisconnectReason.loggedOut) {
+                reason = 'being logged out. Please re-scan the QR code.';
+                shouldReconnect = false; // Do not reconnect on manual logout
+            } else if (statusCode === DisconnectReason.connectionReplaced || statusCode === 428) {
+                reason = 'another session taking over. Trying to reconnect automatically.';
+                shouldReconnect = true; // ננסה חיבור מחדש אוטומטי
+            } else if (lastDisconnect.error) {
+                reason = lastDisconnect.error.message;
+            }
+
+            console.error(`Connection closed due to ${reason}. Reconnecting: ${shouldReconnect}`);
             io.emit('disconnected');
-            if (!shouldReconnect) console.log("Not reconnecting due to a terminal error (e.g., logged out or stream replaced). Please restart the agent manually if needed.");
-            // הוספנו השהיה של 5 שניות למניעת לולאה אינסופית מהירה
-            if (shouldReconnect) setTimeout(connectToWhatsApp, 5000); 
+            if (shouldReconnect) {
+                isReconnecting = true;
+                setTimeout(connectToWhatsApp, 5000);
+            }
         } else if (connection === 'open') {
+            isAgentReady = true; // הסוכן מוכן לקבל הודעות חדשות
+            console.log('הסוכן התחבר לוואטסאפ בהצלחה וממתין להודעות!');
+            io.emit('ready');
+
+            if (isReconnecting) {
+                isReconnecting = false;
+                try {
+                    const myNumberBase = sock?.user?.id?.split(':')[0];
+                    if (myNumberBase) {
+                        const myJid = `${myNumberBase}@s.whatsapp.net`;
+                        await sock.sendMessage(myJid, { text: '✅ חיבור וואטסאפ חודש בהצלחה לאחר ניתוק.' });
+                    }
+                } catch (err) {
+                    console.error('Error sending reconnect confirmation:', err);
+                }
+            }
             isAgentReady = true; // הסוכן מוכן לקבל הודעות חדשות
             console.log('הסוכן התחבר לוואטסאפ בהצלחה וממתין להודעות!');
             io.emit('ready');
@@ -255,16 +284,20 @@ async function connectToWhatsApp() {
     });
 
     sock.ev.on('messages.upsert', async m => {
-        // --- CRITICAL DEBUGGING ---
-        // This will log the raw message object to help diagnose why messages are being ignored.
-        console.log('Received raw upsert event:', JSON.stringify(m, null, 2));
-
         if (m.type !== 'notify') return;
         // התעלמות מכל הודעה שהגיעה לפני שהחיבור הושלם
         if (!isAgentReady) return;
 
         const msg = m.messages[0];
-        if (!msg.message) { console.log('[DEBUG] Ignored message because msg.message is null.'); return; }
+        if (!msg?.message) { console.log('[DEBUG] Ignored message because msg.message is null.'); return; }
+        if (msg.message.protocolMessage) {
+            // הודעות מערכת של וואטסאפ (לדוגמה HISTORY_SYNC_NOTIFICATION) אינן פעילות לשירות.
+            return;
+        }
+
+        // --- DEBUGGING ---
+        // Log only actual WhatsApp messages, not system protocol events.
+        console.log('Received raw upsert event:', JSON.stringify(m, null, 2));
 
         const remoteJid = msg.key.remoteJid;
         const fromMe = msg.key.fromMe;
