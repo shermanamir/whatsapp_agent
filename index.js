@@ -398,7 +398,7 @@ async function connectToWhatsApp() {
             if (!pendingContacts[senderNumber]) {
                 console.log(`[DEBUG] שלב 1: מתחיל אינטראקציה ראשונה מול ${senderNumber}, מבקש שם.`);
                 pendingContacts[senderNumber] = { step: 'WAITING_FOR_NAME', originalMsg: body };
-                await sock.sendMessage(remoteJid, { text: "אינך מופיע באנשי הקשר שלי אנא שלח את שמך המלא על מנת שאשמור אותך באנשי הקשר שלי" }, { quoted: msg });
+                await sock.sendMessage(remoteJid, { text: "אינך מופיע באנשי הקשר אנא שלח את שמך המלא על מנת שאשמור אותך באנשי הקשר שלי" }, { quoted: msg });
                 return; // Stop processing this message, wait for the user's name.
             } else if (pendingContacts[senderNumber].step === 'WAITING_FOR_NAME') {
                 const senderName = body;
