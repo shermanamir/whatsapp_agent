@@ -11,6 +11,10 @@ const http = require('http');
 const { Server } = require("socket.io");
 const qrcodeGenerator = require('qrcode');
 
+// --- Todoist Settings ---
+const { TodoistApi } = require('@doist/todoist-sdk');
+const todoistApi = process.env.TODOIST_API_KEY ? new TodoistApi(process.env.TODOIST_API_KEY) : null;
+
 const SCOPES = ['https://www.googleapis.com/auth/contacts'];
 const TOKEN_PATH = 'token.json';
 
@@ -531,6 +535,22 @@ async function connectToWhatsApp() {
                 }
             }
         }
+
+        // 5. Check for shopping list command
+        if (body && body.toLowerCase().startsWith('רשימת קניות')) {
+            const listText = body.substring('רשימת קניות'.length).trim();
+            if (listText) {
+                const items = listText.split(',').map(item => item.trim()).filter(item => item);
+                if (items.length > 0) {
+                    await createShoppingList(items, senderNumber);
+                } else {
+                    await sock.sendMessage(remoteJid, { text: 'לא מצאתי פריטים ברשימת הקניות. נסה: "רשימת קניות: חלב, לחם, ביצים"' }, { quoted: msg });
+                }
+            } else {
+                await sock.sendMessage(remoteJid, { text: 'איך להשתמש: "רשימת קניות: פריט1, פריט2, פריט3"' }, { quoted: msg });
+            }
+            return; // Stop processing this message
+        }
     });
 }
 
@@ -709,6 +729,33 @@ function createCalendarLink(eventData, title, description) {
 
     const dates = `${format(startDate, isAllDay)}/${format(endDate, isAllDay)}`;
     return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&details=${encodeURIComponent(description)}&dates=${dates}`;
+}
+
+// --- Shopping List Function ---
+async function createShoppingList(items, myNumber) {
+    if (!todoistApi) {
+        await sock.sendMessage(`${myNumber}@s.whatsapp.net`, { text: '❌ Todoist API key לא מוגדר. הוסף TODOIST_API_KEY ל-.env.' });
+        return;
+    }
+
+    try {
+        const projectName = `רשימת קניות ${new Date().toLocaleDateString('he-IL')}`;
+        const project = await todoistApi.addProject({ name: projectName });
+
+        for (const item of items) {
+            await todoistApi.addTask({
+                content: item.trim(),
+                projectId: project.id
+            });
+        }
+
+        await sock.sendMessage(`${myNumber}@s.whatsapp.net`, {
+            text: `✅ רשימת קניות נוצרה ב-Todoist!\nפרויקט: ${projectName}\nפריטים: ${items.length}`
+        });
+    } catch (e) {
+        console.error('שגיאה ביצירת רשימת קניות:', e);
+        await sock.sendMessage(`${myNumber}@s.whatsapp.net`, { text: '❌ שגיאה ביצירת רשימת קניות ב-Todoist.' });
+    }
 }
 
 // --- Start Server and Agent ---
