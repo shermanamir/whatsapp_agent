@@ -1,0 +1,73 @@
+const express = require('express');
+const http = require('http');
+const { Server } = require("socket.io");
+const fs = require('fs');
+
+// Import services and handlers
+const { connectToWhatsApp, getIsAgentReady, setIsAgentReady } = require('./services/whatsappService');
+const { setupTelegramCallbacks, handleMessage } = require('./handlers/messageHandler');
+const { CONTACTS_FILE } = require('./config/config');
+
+// --- In-memory Stores ---
+let myContacts = {};
+if (fs.existsSync(CONTACTS_FILE)) {
+    try {
+        myContacts = JSON.parse(fs.readFileSync(CONTACTS_FILE, 'utf-8'));
+    } catch (e) { console.error('Error loading contacts:', e); }
+}
+const saveContacts = () => fs.writeFileSync(CONTACTS_FILE, JSON.stringify(myContacts));
+
+// --- Web Server Settings ---
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
+// --- Express Endpoints ---
+app.get('/', (req, res) => {
+    res.sendFile(__dirname + '/../index.html');
+});
+
+// --- Start Server and Agent ---
+async function startApp() {
+    const sock = await connectToWhatsApp(io);
+
+    // Setup contacts handling
+    sock.ev.on('contacts.upsert', (contacts) => {
+        let changed = false;
+        for (const contact of contacts) {
+            if (contact.name || contact.notify) {
+                myContacts[contact.id] = contact.name || contact.notify;
+                changed = true;
+            }
+        }
+        if (changed) saveContacts();
+    });
+    sock.ev.on('contacts.update', (updates) => {
+        let changed = false;
+        for (const update of updates) {
+            if (update.name || update.notify) {
+                myContacts[update.id] = update.name || update.notify;
+                changed = true;
+            }
+        }
+        if (changed) saveContacts();
+    });
+
+    // Setup message handling
+    sock.ev.on('messages.upsert', async m => {
+        if (m.type !== 'notify') return;
+        // התעלמות מכל הודעה שהגיעה לפני שהחיבור הושלם
+        if (!getIsAgentReady()) return;
+
+        await handleMessage(sock, m, myContacts, saveContacts);
+    });
+
+    // Setup Telegram callbacks
+    setupTelegramCallbacks(sock);
+}
+
+startApp();
+
+server.listen(3000, () => {
+    console.log('Web server listening on port 3000. Open http://localhost:3000 in your browser.');
+});
