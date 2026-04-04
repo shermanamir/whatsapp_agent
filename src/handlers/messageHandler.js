@@ -3,7 +3,7 @@ const pino = require('pino');
 const { telegramBot, TELEGRAM_CHAT_ID, geminiTriggers } = require('../config/config');
 const { handleGeminiCommand, transcribeAudio } = require('../services/geminiService');
 const { preAnalyzeForCalendar, analyzeForCalendarEvent, createCalendarLink } = require('../services/calendarService');
-const { createShoppingList } = require('../services/todoistService');
+const { createShoppingList, deleteShoppingList, deleteAllShoppingLists, deleteShoppingListItem, getShoppingList, shareShoppingList } = require('../services/todoistService');
 const { authorizeAndSaveContact } = require('../services/googleService');
 const { sendMessageToContact } = require('../services/whatsappService');
 
@@ -314,20 +314,76 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
         }
     }
 
-    // 5. Check for shopping list command
-    if (body && body.toLowerCase().startsWith('רשימת קניות')) {
-        const listText = body.substring('רשימת קניות'.length).trim();
-        if (listText) {
-            const items = listText.split(',').map(item => item.trim()).filter(item => item);
-            if (items.length > 0) {
-                await createShoppingList(items, senderNumber, sock);
-            } else {
-                await sock.sendMessage(remoteJid, { text: 'לא מצאתי פריטים ברשימת הקניות. נסה: "רשימת קניות: חלב, לחם, ביצים"' }, { quoted: msg });
-            }
-        } else {
-            await sock.sendMessage(remoteJid, { text: 'איך להשתמש: "רשימת קניות: פריט1, פריט2, פריט3"' }, { quoted: msg });
+    // 5. Check for shopping list commands
+    if (body) {
+        const lowerBody = body.toLowerCase();
+
+        // Delete all shopping lists
+        if (lowerBody === 'מחק את כל רשימות הקניות') {
+            await deleteAllShoppingLists(senderNumber, sock);
+            return;
         }
-        return; // Stop processing this message
+
+        // Delete specific shopping list
+        const deleteListMatch = body.match(/^מחק רשימת קניות(?: \[([^\]]+)\])?$/i);
+        if (deleteListMatch) {
+            const listName = deleteListMatch[1] || 'רשימת קניות';
+            await deleteShoppingList(listName, senderNumber, sock);
+            return;
+        }
+
+        // Delete item from shopping list
+        const deleteItemMatch = body.match(/^מחק מרשימת קניות(?: \[([^\]]+)\])?:\s*(.+)$/i);
+        if (deleteItemMatch) {
+            const listName = deleteItemMatch[1] || 'רשימת קניות';
+            const itemName = deleteItemMatch[2].trim();
+            await deleteShoppingListItem(listName, itemName, senderNumber, sock);
+            return;
+        }
+
+        // Share shopping list with contact
+        const shareMatch = body.match(/^שתף רשימת קניות(?: \[([^\]]+)\])? עם (.+)$/i);
+        if (shareMatch) {
+            const listName = shareMatch[1] || 'רשימת קניות';
+            const contactName = shareMatch[2].trim();
+            await shareShoppingList(listName, contactName, senderNumber, sock);
+            return;
+        }
+
+        // Create/Add to shopping list
+        if (lowerBody.startsWith('רשימת קניות')) {
+            const listText = body.substring('רשימת קניות'.length).trim();
+
+            // בדוק אם יש שם רשימה ספציפי בפורמט [שם]
+            let listName = null;
+            let itemsText = listText;
+
+            const bracketMatch = listText.match(/^\[([^\]]+)\]:\s*(.+)$/);
+            if (bracketMatch) {
+                listName = bracketMatch[1].trim();
+                itemsText = bracketMatch[2].trim();
+            } else if (listText.startsWith(':')) {
+                itemsText = listText.substring(1).trim();
+            }
+
+            if (itemsText) {
+                const items = itemsText.split(',').map(item => item.trim()).filter(item => item);
+                if (items.length > 0) {
+                    await createShoppingList(items, senderNumber, sock, listName);
+                } else {
+                    const example = listName
+                        ? `רשימת קניות [${listName}]: חלב, לחם, ביצים`
+                        : 'רשימת קניות: חלב, לחם, ביצים';
+                    await sock.sendMessage(remoteJid, { text: `לא מצאתי פריטים ברשימת הקניות. נסה: "${example}"` }, { quoted: msg });
+                }
+            } else {
+                const example = listName
+                    ? `רשימת קניות [${listName}]: פריט1, פריט2, פריט3`
+                    : 'רשימת קניות: פריט1, פריט2, פריט3';
+                await sock.sendMessage(remoteJid, { text: `איך להשתמש: "${example}"` }, { quoted: msg });
+            }
+            return; // Stop processing this message
+        }
     }
 }
 
