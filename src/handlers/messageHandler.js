@@ -158,11 +158,16 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
                 const transcription = await transcribeAudio(media);
                 console.log(`[DEBUG] תמלול הסתיים: "${transcription}"`);
                 if (transcription && transcription.trim()) {
+                    let normalized = transcription.replace(/SILENT_SECTION_[\d_]+/gi, '').trim();
+                    const extracted = normalized.match(/((?:ת?מחק|מחק|שתף)[\s\S]*)/i);
+                    if (extracted) normalized = extracted[1].trim();
+                    normalized = normalized.replace(/[\n\r]+/g, ' ').replace(/[.?!]+$/g, '').trim();
+
                     // שולח את התמלול לטלגרם רק אם ההודעה הגיעה ממישהו אחר (לא ממך)
                     if (telegramBot && !fromMe) {
-                        await telegramBot.sendMessage(TELEGRAM_CHAT_ID, `${senderName} - אמר : "${transcription.trim()}"`).catch(console.error);
+                        await telegramBot.sendMessage(TELEGRAM_CHAT_ID, `${senderName} - אמר : "${normalized}"`).catch(console.error);
                     }
-                    body = transcription.trim();
+                    body = normalized;
                     // After transcription, treat it as a text message for further processing
                     messageType = 'conversation';
                 } else {
@@ -339,7 +344,7 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
         }
 
         // Delete specific shopping list
-        const deleteListMatch = body.match(/^(?:ת)?מחק רשימת קניות(?: \[([^\]]+)\])?$/i);
+        const deleteListMatch = body.match(/^(?:ת)?מחק\s+(?:רשימת\s+קניות|רשימת\s+קניותים|רשימות?|רשימה)(?:\s*\[([^\]]+)\])?\.?$/i);
         if (deleteListMatch) {
             const listName = deleteListMatch[1] || 'רשימת קניות';
             await deleteShoppingList(listName, senderNumber, sock);
