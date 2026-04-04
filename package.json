@@ -4,7 +4,11 @@
   "description": "WhatsApp AI Agent with Gemini",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "dev": "node src/index.js",
+    "setup": "node src/index.js",
+    "install-check": "./install.sh",
+    "test": "echo \"No tests specified\" && exit 0"
   },
   "dependencies": {
     "@doist/todoist-sdk": "^8.2.1",

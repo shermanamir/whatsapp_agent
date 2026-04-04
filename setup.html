@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>הגדרת סוכן וואטסאפ AI</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .step {
+            background: #f8f9fa;
+            border-left: 4px solid #3498db;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 5px;
+        }
+        .step.completed {
+            background: #d4edda;
+            border-left-color: #28a745;
+        }
+        .step.error {
+            background: #f8d7da;
+            border-left-color: #dc3545;
+        }
+        .step h3 {
+            margin-top: 0;
+            color: #2c3e50;
+        }
+        .status {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .status.success { background: #28a745; color: white; }
+        .status.warning { background: #ffc107; color: black; }
+        .status.error { background: #dc3545; color: white; }
+        .code {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            margin: 10px 0;
+            overflow-x: auto;
+        }
+        .btn {
+            background: #3498db;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            margin: 5px;
+        }
+        .btn:hover {
+            background: #2980b9;
+        }
+        .btn.secondary {
+            background: #95a5a6;
+        }
+        .btn.secondary:hover {
+            background: #7f8c8d;
+        }
+        .env-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        .env-table th, .env-table td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: right;
+        }
+        .env-table th {
+            background: #f2f2f2;
+        }
+        .refresh-btn {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: #e74c3c;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <button class="refresh-btn" onclick="location.reload()">🔄 רענן</button>
+
+    <div class="container">
+        <h1>🚀 הגדרת סוכן וואטסאפ AI</h1>
+
+        <div id="status-overview" class="step">
+            <h3>📊 סטטוס כללי</h3>
+            <p>טוען סטטוס מערכת...</p>
+        </div>
+
+        <div class="step" id="step-env">
+            <h3>1️⃣ הגדרת משתני סביבה <span class="status" id="env-status">בודק...</span></h3>
+            <p>צור קובץ <code>.env</code> בתיקיית הפרויקט עם המשתנים הבאים:</p>
+
+            <table class="env-table">
+                <thead>
+                    <tr>
+                        <th>משתנה</th>
+                        <th>תיאור</th>
+                        <th>חובה</th>
+                        <th>סטטוס</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>GEMINI_API_KEY</code></td>
+                        <td>מפתח API מגוגל ג'מיני</td>
+                        <td>✅</td>
+                        <td id="gemini-status">בודק...</td>
+                    </tr>
+                    <tr>
+                        <td><code>TELEGRAM_BOT_TOKEN</code></td>
+                        <td>טוקן בוט טלגרם</td>
+                        <td>❌</td>
+                        <td id="telegram-status">בודק...</td>
+                    </tr>
+                    <tr>
+                        <td><code>TELEGRAM_CHAT_ID</code></td>
+                        <td>מזהה צ'אט טלגרם</td>
+                        <td>❌</td>
+                        <td id="chat-status">בודק...</td>
+                    </tr>
+                    <tr>
+                        <td><code>TODOIST_API_KEY</code></td>
+                        <td>מפתח API טודואיסט</td>
+                        <td>❌</td>
+                        <td id="todoist-status">בודק...</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h4>איך להשיג את המפתחות:</h4>
+            <ul>
+                <li><strong>Gemini API:</strong> <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI Studio</a></li>
+                <li><strong>Telegram Bot:</strong> <a href="https://t.me/BotFather" target="_blank">@BotFather</a> בטלגרם</li>
+                <li><strong>Todoist API:</strong> <a href="https://todoist.com/app/settings/integrations" target="_blank">Todoist Settings</a></li>
+            </ul>
+        </div>
+
+        <div class="step" id="step-credentials">
+            <h3>2️⃣ קבצי אישורים <span class="status" id="credentials-status">בודק...</span></h3>
+            <p>צור קובץ <code>credentials.json</code> בתיקיית הפרויקט:</p>
+            <div class="code">
+{
+  "installed": {
+    "client_id": "YOUR_CLIENT_ID",
+    "client_secret": "YOUR_CLIENT_SECRET",
+    "redirect_uris": ["http://localhost"]
+  }
+}
+            </div>
+            <p><a href="https://console.cloud.google.com/apis/credentials" target="_blank" class="btn">צור אישורים ב-Google Cloud</a></p>
+            <p id="credentials-details">בודק קבצי אישורים...</p>
+        </div>
+
+        <div class="step" id="step-deployment">
+            <h3>3️⃣ פריסה לענן <span class="status" id="deployment-status">בודק...</span></h3>
+            <p>בחר ענן לפריסה:</p>
+
+            <h4>🚂 Railway (מומלץ)</h4>
+            <ol>
+                <li>הירשם ל-<a href="https://railway.app" target="_blank">Railway</a></li>
+                <li>חבר את GitHub</li>
+                <li>דחוף את הקוד ל-repository</li>
+                <li>Railway יזהה את הפרויקט ויפרוס אוטומטית</li>
+            </ol>
+
+            <h4>☁️ Google Cloud Run</h4>
+            <ol>
+                <li>הירשם ל-<a href="https://cloud.google.com" target="_blank">Google Cloud</a></li>
+                <li>צור Dockerfile</li>
+                <li>השתמש ב-Cloud Build ו-Cloud Run</li>
+            </ol>
+
+            <h4>🔧 כללי לכל ענן:</h4>
+            <ul>
+                <li>הגדר את משתני הסביבה בענן</li>
+                <li>ודא שיש גישה ל-WhatsApp Web</li>
+                <li>שמור backup של תיקיית <code>auth_info_baileys</code></li>
+            </ul>
+        </div>
+
+        <div class="step" id="step-whatsapp">
+            <h3>4️⃣ התחברות לוואטסאפ <span class="status" id="whatsapp-status">בודק...</span></h3>
+            <p>כדי להתחבר לוואטסאפ:</p>
+            <ol>
+                <li>הפעל את האפליקציה</li>
+                <li>פתח <code>http://localhost:3000</code> (או כתובת הענן)</li>
+                <li>סרוק את קוד ה-QR עם אפליקציית וואטסאפ</li>
+                <li>המתן לאישור החיבור</li>
+            </ol>
+            <p><strong>חשוב:</strong> שמור את תיקיית <code>auth_info_baileys</code> - היא מכילה את פרטי ההתחברות.</p>
+        </div>
+
+        <div class="step" id="step-usage">
+            <h3>5️⃣ שימוש באפליקציה</h3>
+            <p>אחרי ההתחברות, האפליקציה תענה אוטומטית להודעות:</p>
+
+            <h4>פקודות זמינות:</h4>
+            <ul>
+                <li><strong>ג'מיני [טקסט]:</strong> שאל שאלות מג'מיני AI</li>
+                <li><strong>רשימת קניות: פריט1, פריט2:</strong> צור רשימת קניות ב-Todoist</li>
+                <li><strong>הודעות מאנשים לא מוכרים:</strong> האפליקציה תבקש אישור דרך טלגרם</li>
+                <li><strong>זיהוי אירועים:</strong> האפליקציה תזהה פגישות ותציע להוסיף ליומן</li>
+            </ul>
+
+            <h4>הגדרות טלגרם (אופציונלי):</h4>
+            <p>הגדר טלגרם לקבלת התראות על הודעות חדשות ואישורים.</p>
+        </div>
+
+        <div class="step" id="step-troubleshooting">
+            <h3>🔧 פתרון בעיות</h3>
+            <h4>בעיות נפוצות:</h4>
+            <ul>
+                <li><strong>האפליקציה לא מתחילה:</strong> בדוק שכל משתני הסביבה מוגדרים</li>
+                <li><strong>שגיאת חיבור לוואטסאפ:</strong> נסה למחוק <code>auth_info_baileys</code> וסרוק QR שוב</li>
+                <li><strong>ג'מיני לא עובד:</strong> בדוק את ה-API key</li>
+                <li><strong>טלגרם לא שולח:</strong> בדוק את ה-bot token וה-chat ID</li>
+            </ul>
+
+            <p><a href="https://github.com/amirhanna/whatsapp-agent/issues" target="_blank" class="btn">דווח על בעיה</a></p>
+        </div>
+    </div>
+
+    <script>
+        async function checkStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                updateUI(data);
+            } catch (error) {
+                console.error('Error checking status:', error);
+                // Fallback to basic checks
+                checkBasicStatus();
+            }
+        }
+
+        function checkBasicStatus() {
+            // Basic client-side checks
+            const envVars = ['GEMINI_API_KEY', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'TODOIST_API_KEY'];
+
+            // Check if credentials.json exists (can't check content client-side)
+            fetch('credentials.json')
+                .then(response => {
+                    document.getElementById('credentials-status').textContent = response.ok ? 'קיים' : 'חסר';
+                    document.getElementById('credentials-status').className = 'status ' + (response.ok ? 'success' : 'error');
+                })
+                .catch(() => {
+                    document.getElementById('credentials-status').textContent = 'חסר';
+                    document.getElementById('credentials-status').className = 'status error';
+                });
+
+            // Check auth_info_baileys
+            fetch('auth_info_baileys/creds.json')
+                .then(response => {
+                    document.getElementById('whatsapp-status').textContent = response.ok ? 'מחובר' : 'לא מחובר';
+                    document.getElementById('whatsapp-status').className = 'status ' + (response.ok ? 'success' : 'warning');
+                })
+                .catch(() => {
+                    document.getElementById('whatsapp-status').textContent = 'לא מחובר';
+                    document.getElementById('whatsapp-status').className = 'status warning';
+                });
+        }
+
+        function updateUI(data) {
+            // Update environment variables status
+            const envStatus = data.environment || {};
+            document.getElementById('gemini-status').textContent = envStatus.GEMINI_API_KEY ? 'מוגדר' : 'חסר';
+            document.getElementById('gemini-status').className = 'status ' + (envStatus.GEMINI_API_KEY ? 'success' : 'error');
+
+            document.getElementById('telegram-status').textContent = envStatus.TELEGRAM_BOT_TOKEN ? 'מוגדר' : 'חסר';
+            document.getElementById('telegram-status').className = 'status ' + (envStatus.TELEGRAM_BOT_TOKEN ? 'success' : 'warning');
+
+            document.getElementById('chat-status').textContent = envStatus.TELEGRAM_CHAT_ID ? 'מוגדר' : 'חסר';
+            document.getElementById('chat-status').className = 'status ' + (envStatus.TELEGRAM_CHAT_ID ? 'success' : 'warning');
+
+            document.getElementById('todoist-status').textContent = envStatus.TODOIST_API_KEY ? 'מוגדר' : 'חסר';
+            document.getElementById('todoist-status').className = 'status ' + (envStatus.TODOIST_API_KEY ? 'success' : 'warning');
+
+            // Update overall status
+            const allRequired = envStatus.GEMINI_API_KEY;
+            const overallStatus = allRequired ? 'success' : 'error';
+            document.getElementById('env-status').textContent = allRequired ? 'הושלם' : 'חסר משתנים חובה';
+            document.getElementById('env-status').className = 'status ' + overallStatus;
+
+            // Update step classes
+            document.getElementById('step-env').className = 'step ' + (allRequired ? 'completed' : 'error');
+        }
+
+        // Check status on page load
+        window.onload = checkStatus;
+    </script>
+</body>
+</html>

@@ -27,6 +27,46 @@ app.get('/', (req, res) => {
     res.sendFile(__dirname + '/../index.html');
 });
 
+app.get('/setup', (req, res) => {
+    res.sendFile(__dirname + '/../setup.html');
+});
+
+app.get('/api/status', (req, res) => {
+    const fs = require('fs');
+    const path = require('path');
+
+    // Check environment variables
+    const envStatus = {
+        GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
+        TELEGRAM_BOT_TOKEN: !!process.env.TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID: !!process.env.TELEGRAM_CHAT_ID,
+        TODOIST_API_KEY: !!process.env.TODOIST_API_KEY
+    };
+
+    // Check files
+    const credentialsPath = path.join(__dirname, '..', 'credentials.json');
+    const authPath = path.join(__dirname, '..', 'auth_info_baileys', 'creds.json');
+    const contactsPath = path.join(__dirname, '..', 'contacts.json');
+
+    const fileStatus = {
+        credentials: fs.existsSync(credentialsPath),
+        auth: fs.existsSync(authPath),
+        contacts: fs.existsSync(contactsPath)
+    };
+
+    // Check WhatsApp connection
+    const isConnected = getIsAgentReady();
+
+    res.json({
+        environment: envStatus,
+        files: fileStatus,
+        whatsapp: {
+            connected: isConnected
+        },
+        timestamp: new Date().toISOString()
+    });
+});
+
 // --- Start Server and Agent ---
 async function startApp() {
     const sock = await connectToWhatsApp(io);

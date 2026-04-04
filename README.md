@@ -1,21 +1,200 @@
-# whatsapp_agent
+# 🤖 סוכן וואטסאפ AI
 
-This is an intelligent WhatsApp personal assistant powered by Node.js, `whatsapp-web.js`, and Google's Gemini 2.5 Flash AI model.
+סוכן אישי חכם לוואטסאפ המופעל על ידי Node.js, Baileys, ומודל Gemini 2.5 Flash של גוגל.
 
-## Features
+## ✨ תכונות עיקריות
 
-*   **AI-Powered Messaging:** Send messages to your contacts using natural language commands directly from your WhatsApp (e.g., "Gemini, text John that I'll be 5 minutes late"). The agent uses Gemini Function Calling to find the contact and send the message.
-*   **Unknown Contact Management:** When an unknown number messages you, the agent automatically greets them, asks for their name, and sends you a private approval request.
-*   **Google Contacts Integration:** If you approve a new contact, the agent uses the Google People API to automatically save their name and number directly to your Google Contacts.
-*   **Voice Message Transcription:** Automatically transcribes incoming voice messages (PTT) to text and replies in the chat so you can read what was said without listening.
-*   **Voice Commands:** You can send voice notes to the agent with commands, and it will transcribe and execute them seamlessly.
+*   **הודעות מבוססות AI:** שלח הודעות לאנשי הקשר שלך באמצעות פקודות בשפה טבעית ישירות מוואטסאפ (למשל: "ג'מיני, תגיד ליון שאני אאחר 5 דקות")
+*   **ניהול אנשי קשר לא מוכרים:** כשמספר לא מוכר שולח לך הודעה, הסוכן מברך אותו, שואל לשם, ושולח לך בקשת אישור פרטית
+*   **שילוב עם אנשי קשר של גוגל:** אם אתה מאשר איש קשר חדש, הסוכן משתמש ב-Google People API כדי לשמור אוטומטית את השם והמספר לאנשי הקשר שלך בגוגל
+*   **תמלול הודעות קוליות:** מתמלל אוטומטית הודעות קוליות נכנסות (PTT) לטקסט ועונה בצ'אט כדי שתוכל לקרוא מה נאמר בלי להאזין
+*   **פקודות קוליות:** אתה יכול לשלוח הודעות קוליות לסוכן עם פקודות, והוא יתמלל ויבצע אותן בצורה חלקה
+*   **זיהוי אירועי יומן:** הסוכן מזהה אוטומטית פגישות מהודעות ומציע להוסיף אותן ליומן גוגל
+*   **רשימות קניות:** צור רשימות קניות אוטומטיות ב-Todoist עם פקודה פשוטה
+*   **התראות טלגרם:** קבל התראות על הודעות חדשות והחלטות שדורשות אישור
 
-## Getting Started
+## 🚀 התחלה מהירה
 
-1.  Clone the repository and run `npm install`.
-2.  Create a `.env` file with your `GEMINI_API_KEY`.
-3.  Place your Google Cloud OAuth 2.0 `credentials.json` file in the root directory (required for Google Contacts sync).
-4.  Run `npm start`.
-5.  Scan the QR code with your WhatsApp mobile app to connect.
+### דרישות מקדימות
+- Node.js 18+
+- חשבון גוגל עם Gemini API
+- אפליקציית וואטסאפ
+- (אופציונלי) חשבון טלגרם לבוט התראות
+- (אופציונלי) חשבון Todoist לרשימות קניות
 
-*Note: The first time you run the agent and approve a contact, you will be prompted to authenticate with Google via the terminal.*
+### שלבי ההתקנה
+
+1. **הורד את הקוד:**
+   ```bash
+   git clone <repository-url>
+   cd whatsapp_agent
+   npm install
+   ```
+
+2. **הגדר משתני סביבה:**
+   צור קובץ `.env` בתיקיית הפרויקט:
+   ```env
+   GEMINI_API_KEY=your_gemini_api_key_here
+   TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here  # אופציונלי
+   TELEGRAM_CHAT_ID=your_telegram_chat_id_here      # אופציונלי
+   TODOIST_API_KEY=your_todoist_api_key_here        # אופציונלי
+   ```
+
+3. **הגדר אישורי גוגל:**
+   - היכנס ל-[Google Cloud Console](https://console.cloud.google.com/)
+   - צור פרויקט חדש או בחר פרויקט קיים
+   - אפשר את Google People API
+   - צור OAuth 2.0 credentials
+   - הורד את `credentials.json` ושם אותו בתיקיית הפרויקט
+
+4. **הפעל את האפליקציה:**
+   ```bash
+   npm start
+   ```
+
+5. **התחבר לוואטסאפ:**
+   - פתח `http://localhost:3000` בדפדפן
+   - סרוק את קוד ה-QR עם אפליקציית וואטסאפ
+   - המתן לאישור החיבור
+
+## 📋 מדריך הגדרות מפורט
+
+### ממשק הגדרות
+אחרי הפעלת האפליקציה, פתח `http://localhost:3000/setup` בדפדפן לקבלת מדריך אינטראקטיבי עם בדיקת סטטוס.
+
+### בדיקת התקנה אוטומטית
+```bash
+npm run install-check
+```
+הסקריפט יבדוק שכל הדרישות מתקיימות וינחה אותך בשלבים החסרים.
+
+### הרצה עם Docker
+```bash
+docker-compose up -d
+```
+
+### השגת מפתחות API
+
+#### Gemini API Key
+1. היכנס ל-[Google AI Studio](https://makersuite.google.com/app/apikey)
+2. צור API key חדש
+3. העתק אותו ל-`.env` תחת `GEMINI_API_KEY`
+
+#### Telegram Bot (אופציונלי)
+1. פתח צ'אט עם [@BotFather](https://t.me/BotFather) בטלגרם
+2. שלח `/newbot` וציית להוראות
+3. העתק את ה-token ל-`.env` תחת `TELEGRAM_BOT_TOKEN`
+4. שלח הודעה לבוט שלך וגש ל-`https://api.telegram.org/bot<TOKEN>/getUpdates` כדי לקבל את ה-chat ID
+5. העתק את ה-chat ID ל-`.env` תחת `TELEGRAM_CHAT_ID`
+
+#### Todoist API (אופציונלי)
+1. היכנס ל-[Todoist Settings](https://todoist.com/app/settings/integrations)
+2. צור API token חדש
+3. העתק אותו ל-`.env` תחת `TODOIST_API_KEY`
+
+## 🎯 שימוש באפליקציה
+
+### פקודות בסיסיות
+שלח הודעות **לעצמך** (self-chat) עם הפקודות הבאות:
+
+#### AI והודעות
+```
+ג'מיני, מה מזג האוויר היום?
+ג'מיני, תגיד לאשתי שאני אגיע מאוחר
+ג'מיני, תזכיר לי מה קניתי בסופר בשבוע שעבר
+```
+
+#### רשימות קניות
+```
+רשימת קניות: חלב, לחם, ביצים, עגבניות
+```
+
+### תכונות אוטומטיות
+- **אנשי קשר לא מוכרים:** הסוכן יברר את השם וישאל אישור דרך טלגרם
+- **זיהוי פגישות:** הודעות כמו "מחר ב-15:00 נפגשים" יזוהו ויוצע להוסיף ליומן
+- **תמלול קולי:** הודעות קוליות מתמללות אוטומטית
+
+### התראות טלגרם
+אם הגדרת טלגרם, תקבל:
+- התראות על הודעות מאנשים לא מוכרים
+- בקשות אישור להוספת אנשי קשר
+- הצעות להוספת אירועים ליומן
+
+## ☁️ פריסה לענן
+
+### Railway (מומלץ למתחילים)
+1. הירשם ל-[Railway](https://railway.app)
+2. חבר את GitHub repository
+3. Railway יזהה את הפרויקט ויפרוס אוטומטית
+4. הגדר משתני סביבה ב-Railway dashboard
+
+### Google Cloud Run
+1. התקן Google Cloud CLI
+2. צור Dockerfile:
+   ```dockerfile
+   FROM node:18-alpine
+   WORKDIR /app
+   COPY package*.json ./
+   RUN npm ci --only=production
+   COPY . .
+   EXPOSE 3000
+   CMD ["npm", "start"]
+   ```
+3. פרוס:
+   ```bash
+   gcloud run deploy --source .
+   ```
+
+### Render
+1. הירשם ל-[Render](https://render.com)
+2. חבר את GitHub repository
+3. בחר "Web Service"
+4. הגדר משתני סביבה
+
+## 🔧 פתרון בעיות
+
+### בעיות נפוצות
+
+#### האפליקציה לא מתחילה
+- בדוק שכל משתני הסביבה ב-`.env` מוגדרים נכון
+- וודא ש-Node.js 18+ מותקן
+- בדוק שכל התלויות הותקנו: `npm install`
+
+#### שגיאת חיבור לוואטסאפ
+- מחק את תיקיית `auth_info_baileys`
+- הפעל מחדש וסרוק QR שוב
+- בדוק שיש חיבור אינטרנט יציב
+
+#### Gemini לא עובד
+- בדוק ש-`GEMINI_API_KEY` נכון
+- וודא שיש יתרה ב-Google AI Studio
+
+#### טלגרם לא שולח התראות
+- בדוק ש-`TELEGRAM_BOT_TOKEN` ו-`TELEGRAM_CHAT_ID` נכונים
+- וודא שהבוט הוזמן לצ'אט
+
+#### בעיות בענן
+- בדוק את לוגי האפליקציה בענן
+- וודא שכל משתני הסביבה הוגדרו בענן
+- בדוק שיש גישה ל-WhatsApp Web (חלק מהעננים חוסמים את זה)
+
+### קבצים חשובים לשמירה
+- `auth_info_baileys/` - פרטי ההתחברות לוואטסאפ
+- `contacts.json` - אנשי הקשר השמורים
+- `token.json` - אישורי גוגל
+
+## 📝 רישיון
+
+פרויקט זה הוא קוד פתוח. אנא קרא את תנאי השימוש.
+
+## 🤝 תרומה
+
+תרומות מוזמנות! אנא פתח issue או pull request.
+
+## 📞 תמיכה
+
+לשאלות או בעיות, פתח issue ב-GitHub או צור קשר.
+
+---
+
+**הערה:** הפרויקט משתמש ב-Baileys library שמתחבר ל-WhatsApp Web. שימוש זה עלול להפר את תנאי השימוש של וואטסאפ. השתמש באחריותך.

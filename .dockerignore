@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+.env
+.env.local
+auth_info_baileys/
+contacts.json
+token.json
+.git
+.gitignore
+README.md
+.DS_Store
+*.log
