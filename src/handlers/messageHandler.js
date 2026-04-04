@@ -319,13 +319,13 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
         const lowerBody = body.toLowerCase();
 
         // Delete all shopping lists
-        if (lowerBody === 'מחק את כל רשימות הקניות') {
+        if (lowerBody === 'מחק את כל רשימות הקניות' || lowerBody === 'תמחק את כל רשימות הקניות') {
             await deleteAllShoppingLists(senderNumber, sock);
             return;
         }
 
         // Delete specific shopping list
-        const deleteListMatch = body.match(/^מחק רשימת קניות(?: \[([^\]]+)\])?$/i);
+        const deleteListMatch = body.match(/^(?:ת)?מחק רשימת קניות(?: \[([^\]]+)\])?$/i);
         if (deleteListMatch) {
             const listName = deleteListMatch[1] || 'רשימת קניות';
             await deleteShoppingList(listName, senderNumber, sock);
@@ -333,7 +333,7 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
         }
 
         // Delete item from shopping list
-        const deleteItemMatch = body.match(/^מחק מרשימת קניות(?: \[([^\]]+)\])?:\s*(.+)$/i);
+        const deleteItemMatch = body.match(/^(?:ת)?מחק מרשימת קניות(?: \[([^\]]+)\])?:\s*(.+)$/i);
         if (deleteItemMatch) {
             const listName = deleteItemMatch[1] || 'רשימת קניות';
             const itemName = deleteItemMatch[2].trim();
@@ -342,7 +342,7 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
         }
 
         // Share shopping list with contact
-        const shareMatch = body.match(/^שתף רשימת קניות(?: \[([^\]]+)\])? עם (.+)$/i);
+        const shareMatch = body.match(/^(?:ת)?שתף רשימת קניות(?: \[([^\]]+)\])? עם (.+)$/i);
         if (shareMatch) {
             const listName = shareMatch[1] || 'רשימת קניות';
             const contactName = shareMatch[2].trim();
