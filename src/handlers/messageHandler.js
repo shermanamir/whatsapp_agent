@@ -90,6 +90,12 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
     // קביעת המזהה האמיתי של השולח. עם LIDs, ה-remoteJid הוא מזהה השיחה, וה-senderPn הוא מספר הטלפון האמיתי.
     const senderJid = msg.key.senderPn || remoteJid;
 
+    const isSelfChatLid = remoteJid.endsWith('@lid');
+    const myNumberBase = sock.user?.id?.split(':')[0];
+    const myJid = myNumberBase ? `${myNumberBase}@s.whatsapp.net` : null;
+    const senderNumber = senderJid.split('@')[0]; // שימוש במספר האמיתי של השולח
+    const isSentToMe = remoteJid.startsWith(myNumberBase) || isSelfChatLid;
+
     // -- Start of Message Unwrapping --
     // This block handles various message wrappers (like ephemeral messages) to extract the actual content.
     let innerMsg = msg.message;
@@ -127,12 +133,7 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
         return;
     }
 
-    const myNumberBase = sock.user?.id?.split(':')[0];
     if (!myNumberBase) return; // הגנה למקרה שהסוכן לא סיים אתחול לגמרי
-
-    const myJid = `${myNumberBase}@s.whatsapp.net`;
-    const senderNumber = senderJid.split('@')[0]; // שימוש במספר האמיתי של השולח
-    const isSentToMe = remoteJid.startsWith(myNumberBase);
 
     let body = '';
     if (messageType === 'conversation') body = messageContent;
@@ -145,7 +146,7 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
 
     if ((!body || body.trim() === '') && messageType !== 'audioMessage') return;
 
-    console.log(`[DEBUG] התקבלה הודעה מ: ${remoteJid}, אל: ${fromMe ? remoteJid : myJid}, סוג: ${messageType}, תוכן: "${body}"`);
+    console.log(`[DEBUG] התקבלה הודעה מ: ${remoteJid}, אל: ${fromMe ? remoteJid : myJid}, סוג: ${messageType}, תוכן: "${body}", fromMe: ${fromMe}, isSentToMe: ${isSentToMe}`);
 
     if (messageType === 'audioMessage' && messageContent?.ptt) {
         try {
@@ -155,7 +156,8 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
                 console.log(`[DEBUG] מתמלל הודעה קולית מ-${senderName}`);
                 const media = { data: buffer.toString('base64'), mimetype: messageContent.mimetype };
                 const transcription = await transcribeAudio(media);
-                if (transcription) {
+                console.log(`[DEBUG] תמלול הסתיים: "${transcription}"`);
+                if (transcription && transcription.trim()) {
                     // שולח את התמלול לטלגרם רק אם ההודעה הגיעה ממישהו אחר (לא ממך)
                     if (telegramBot && !fromMe) {
                         await telegramBot.sendMessage(TELEGRAM_CHAT_ID, `${senderName} - אמר : "${transcription.trim()}"`).catch(console.error);
@@ -163,9 +165,21 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
                     body = transcription.trim();
                     // After transcription, treat it as a text message for further processing
                     messageType = 'conversation';
+                } else {
+                    console.log('[DEBUG] הודעה קולית תורגמה לריק; לא מתבצע המשך עיבוד של תוכן טקסט.' );
                 }
+            } else {
+                console.log('[DEBUG] לא יכול להוריד את ההודעה הקולית כ-buffer.');
             }
-        } catch (e) { console.error("שגיאה בטיפול בהודעה קולית:", e); return; }
+        } catch (e) {
+            console.error("שגיאה בטיפול בהודעה קולית:", e);
+            return;
+        }
+
+        if ((!body || !body.trim()) && fromMe && isSentToMe) {
+            await sock.sendMessage(myJid, { text: '❌ לא הצלחתי לתמלל את ההודעה הקולית. נסה לשלוח טקסט או דיבור קצר יותר.' });
+            return;
+        }
     }
 
     // --- Main Logic Flow ---
