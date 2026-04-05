@@ -15,8 +15,14 @@ async function createShoppingList(items, myNumber, sock, listName = null) {
         // חפש פרויקט קיים עם השם הזה
         let project = null;
         try {
-            const projects = await todoistApi.getProjects();
-            project = projects.find(p => p.name === projectName);
+            let projects = await todoistApi.getProjects();
+            // API returns { results: [...], nextCursor: null }
+            if (projects && projects.results) {
+                projects = projects.results;
+            }
+            if (Array.isArray(projects)) {
+                project = projects.find(p => p.name === projectName);
+            }
         } catch (e) {
             console.log('לא הצלחנו לקבל רשימת פרויקטים:', e.message);
         }
@@ -64,20 +70,50 @@ async function deleteShoppingList(listName, myNumber, sock) {
         return;
     }
 
+    console.log(`[DEBUG] deleteShoppingList: התחלה, listName="${listName}", myNumber="${myNumber}"`);
+
     try {
-        const projects = await todoistApi.getProjects();
-        const project = projects.find(p => p.name === listName);
+        console.log('[DEBUG] deleteShoppingList: משיגים פרויקטים...');
+        let projects = await todoistApi.getProjects();
+        console.log(`[DEBUG] deleteShoppingList: קיבלנו projects, סוג: ${typeof projects}, יש results: ${!!projects?.results}`);
+        
+        // API returns { results: [...], nextCursor: null }
+        if (projects && projects.results) {
+            projects = projects.results;
+        } else if (!Array.isArray(projects)) {
+            console.error('API response projects format unknown:', typeof projects, projects);
+            projects = [];
+        }
+
+        console.log(`[DEBUG] deleteShoppingList: ${projects.length} פרויקטים זמינים`);
+        projects.forEach(p => console.log(`[DEBUG]   - פרויקט: "${p.name}"`));
+        
+        // תחפש תחילה התאמה מדויקת, אם לא - חפש חלקית
+        let project = projects.find(p => p.name === listName);
+        if (!project) {
+            project = projects.find(p => p.name.includes(listName) && p.name.includes('קניות'));
+        }
+        if (!project && listName === 'רשימת קניות') {
+            // אם המשתמש ביקש "רשימת קניות", קבל את כל פרויקט שמכיל "קניות"
+            project = projects.find(p => p.name.includes('קניות'));
+        }
+        
+        console.log(`[DEBUG] deleteShoppingList: חיפוש אחרי "${listName}", נמצא: ${!!project}${project ? ` (שם אמיתי: "${project.name}")` : ''}`);
 
         if (!project) {
+            console.log(`[DEBUG] deleteShoppingList: שלח הודעת שגיאה - לא נמצא פרויקט`);
             await sock.sendMessage(`${myNumber}@s.whatsapp.net`, { text: `❌ לא נמצאה רשימת קניות בשם "${listName}".` });
             return;
         }
 
+        console.log(`[DEBUG] deleteShoppingList: מוחקים פרויקט ID ${project.id}`);
         await todoistApi.deleteProject(project.id);
+        console.log(`[DEBUG] deleteShoppingList: שלח הודעת הצלחה`);
         await sock.sendMessage(`${myNumber}@s.whatsapp.net`, { text: `✅ רשימת הקניות "${listName}" נמחקה בהצלחה!` });
 
     } catch (e) {
         console.error('שגיאה במחיקת רשימת קניות:', e);
+        console.error('Stack:', e.stack);
         await sock.sendMessage(`${myNumber}@s.whatsapp.net`, { text: '❌ שגיאה במחיקת רשימת הקניות.' });
     }
 }
@@ -89,7 +125,15 @@ async function deleteAllShoppingLists(myNumber, sock) {
     }
 
     try {
-        const projects = await todoistApi.getProjects();
+        let projects = await todoistApi.getProjects();
+        // API returns { results: [...], nextCursor: null }
+        if (projects && projects.results) {
+            projects = projects.results;
+        } else if (!Array.isArray(projects)) {
+            console.error('API response projects format unknown:', typeof projects, projects);
+            projects = [];
+        }
+
         const shoppingLists = projects.filter(p => p.name.includes('רשימת קניות') || p.name.includes('קניות'));
 
         if (shoppingLists.length === 0) {
@@ -122,7 +166,15 @@ async function deleteShoppingListItem(listName, itemName, myNumber, sock) {
     }
 
     try {
-        const projects = await todoistApi.getProjects();
+        let projects = await todoistApi.getProjects();
+        // API returns { results: [...], nextCursor: null }
+        if (projects && projects.results) {
+            projects = projects.results;
+        } else if (!Array.isArray(projects)) {
+            console.error('API response projects format unknown:', typeof projects, projects);
+            projects = [];
+        }
+
         const project = projects.find(p => p.name === listName);
 
         if (!project) {
@@ -157,7 +209,15 @@ async function getShoppingList(listName, myNumber, sock) {
     }
 
     try {
-        const projects = await todoistApi.getProjects();
+        let projects = await todoistApi.getProjects();
+        // API returns { results: [...], nextCursor: null }
+        if (projects && projects.results) {
+            projects = projects.results;
+        } else if (!Array.isArray(projects)) {
+            console.error('API response projects format unknown:', typeof projects, projects);
+            projects = [];
+        }
+
         const project = projects.find(p => p.name === listName);
 
         if (!project) {
@@ -209,7 +269,6 @@ async function shareShoppingList(listName, contactName, myNumber, sock) {
         }
 
         const [contactNumber, contactNameFound] = contactEntry;
-
         // צור הודעה עם הרשימה
         let message = `🛒 רשימת קניות: ${shoppingList.name}\n\n`;
         shoppingList.items.forEach((item, index) => {

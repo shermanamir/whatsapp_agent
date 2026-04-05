@@ -70,6 +70,7 @@ function setupTelegramCallbacks(sock) {
 }
 
 async function handleMessage(sock, m, myContacts, saveContacts) {
+    console.log('[DEBUG] handleMessage start', {type: m.type, messages: m.messages?.length});
     const msg = m.messages[0];
     if (!msg?.message) { console.log('[DEBUG] Ignored message because msg.message is null.'); return; }
     if (msg.message.protocolMessage) {
@@ -302,9 +303,12 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
 
     // 4. Any message that reaches this point is eligible for calendar analysis.
     if (body && body.trim() !== '') {
-        if (preAnalyzeForCalendar(body)) {
+        const shouldAnalyze = preAnalyzeForCalendar(body);
+        console.log('[DEBUG] preAnalyzeForCalendar result:', shouldAnalyze, { body });
+        if (shouldAnalyze) {
             const chatName = myContacts[senderJid] || pushName || senderNumber;
             const eventData = await analyzeForCalendarEvent(body);
+            console.log('[DEBUG] analyzeForCalendarEvent result:', eventData);
             if (eventData && eventData.hasEvent) {
                 const eventTitle = fromMe ? `פגישה עם ${chatName}` : `${chatName} זימן פגישה`;
                 pendingCalendarEvents[senderNumber] = { data: eventData, title: eventTitle, description: body };
@@ -336,16 +340,19 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
     // 5. Check for shopping list commands
     if (body) {
         const lowerBody = body.toLowerCase();
+        console.log(`[DEBUG] בדיקת פקודות קניות. גוף הודעה: "${body}"`);
 
         // Delete all shopping lists
         if (lowerBody === 'מחק את כל רשימות הקניות' || lowerBody === 'תמחק את כל רשימות הקניות') {
+            console.log('[DEBUG] התאימה "מחק את כל רשימות הקניות"');
             await deleteAllShoppingLists(senderNumber, sock);
             return;
         }
 
         // Delete specific shopping list
-        const deleteListMatch = body.match(/^(?:ת)?מחק\s+(?:רשימת\s+קניות|רשימת\s+קניותים|רשימות?|רשימה)(?:\s*\[([^\]]+)\])?\.?$/i);
+        const deleteListMatch = body.match(/^(?:ת)?מחק\s+(?:רשימת(?:\s+קניות)?|רשימת|רשימות?|רשימה)(?:\s*\[([^\]]+)\])?\.?$/i);
         if (deleteListMatch) {
+            console.log('[DEBUG] התאימה "מחק רשימה/רשימות"');
             const listName = deleteListMatch[1] || 'רשימת קניות';
             await deleteShoppingList(listName, senderNumber, sock);
             return;
@@ -354,6 +361,7 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
         // Delete item from shopping list
         const deleteItemMatch = body.match(/^(?:ת)?מחק מרשימת קניות(?: \[([^\]]+)\])?:\s*(.+)$/i);
         if (deleteItemMatch) {
+            console.log('[DEBUG] התאימה "מחק מרשימת קניות: [פריט]"');
             const listName = deleteItemMatch[1] || 'רשימת קניות';
             const itemName = deleteItemMatch[2].trim();
             await deleteShoppingListItem(listName, itemName, senderNumber, sock);
@@ -363,6 +371,7 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
         // Share shopping list with contact
         const shareMatch = body.match(/^(?:ת)?שתף רשימת קניות(?: \[([^\]]+)\])? עם (.+)$/i);
         if (shareMatch) {
+            console.log('[DEBUG] התאימה "שתף רשימת קניות עם [איש קשר]"');
             const listName = shareMatch[1] || 'רשימת קניות';
             const contactName = shareMatch[2].trim();
             await shareShoppingList(listName, contactName, senderNumber, sock);
@@ -371,34 +380,58 @@ async function handleMessage(sock, m, myContacts, saveContacts) {
 
         // Create/Add to shopping list
         if (lowerBody.startsWith('רשימת קניות')) {
+            console.log('[DEBUG] התאימה "רשימת קניות"');
             const listText = body.substring('רשימת קניות'.length).trim();
 
-            // בדוק אם יש שם רשימה ספציפי בפורמט [שם]
-            let listName = null;
-            let itemsText = listText;
+            let listName = 'רשימת קניות';
+            let itemsText = '';
 
-            const bracketMatch = listText.match(/^\[([^\]]+)\]:\s*(.+)$/);
-            if (bracketMatch) {
-                listName = bracketMatch[1].trim();
-                itemsText = bracketMatch[2].trim();
-            } else if (listText.startsWith(':')) {
-                itemsText = listText.substring(1).trim();
+            // בדוק אם יש מילה "פריטים" בטקסט
+            const itemsKeywordMatch = listText.match(/פריטים\s+(.+)$/i);
+            
+            if (itemsKeywordMatch) {
+                // כל מה שלפני "פריטים" הוא השם
+                const beforeKeyword = listText.substring(0, listText.toLowerCase().indexOf('פריטים')).trim();
+                if (beforeKeyword) {
+                    listName = `רשימת קניות ${beforeKeyword}`;
+                }
+                itemsText = itemsKeywordMatch[1].trim();
+            } else {
+                // אם אין מילת "פריטים" - בדוק פורמטים קדומים
+                const bracketMatch = listText.match(/^\[([^\]]+)\]:\s*(.+)$/);
+                if (bracketMatch) {
+                    listName = bracketMatch[1].trim();
+                    itemsText = bracketMatch[2].trim();
+                } else if (listText.startsWith(':')) {
+                    itemsText = listText.substring(1).trim();
+                } else if (!listText) {
+                    itemsText = '';
+                } else {
+                    // בטקסט בלא "פריטים", התייחס לכל הטקסט כפריטים
+                    itemsText = listText;
+                }
             }
 
             if (itemsText) {
-                const items = itemsText.split(',').map(item => item.trim()).filter(item => item);
+                let items = [];
+                
+                // בדוק אם יש פסיקים בטקסט
+                if (itemsText.includes(',')) {
+                    // אם יש פסיקים - חלק לפי פסיקים
+                    items = itemsText.split(',').map(item => item.trim()).filter(item => item);
+                } else {
+                    // אם אין פסיקים - חלק לפי רווחים (למשל בהודעה קולית)
+                    items = itemsText.split(/\s+/).filter(item => item);
+                }
+                
                 if (items.length > 0) {
                     await createShoppingList(items, senderNumber, sock, listName);
                 } else {
-                    const example = listName
-                        ? `רשימת קניות [${listName}]: חלב, לחם, ביצים`
-                        : 'רשימת קניות: חלב, לחם, ביצים';
+                    const example = `רשימת קניות ליום שישי פריטים לחם חלב גבינה`;
                     await sock.sendMessage(remoteJid, { text: `לא מצאתי פריטים ברשימת הקניות. נסה: "${example}"` }, { quoted: msg });
                 }
             } else {
-                const example = listName
-                    ? `רשימת קניות [${listName}]: פריט1, פריט2, פריט3`
-                    : 'רשימת קניות: פריט1, פריט2, פריט3';
+                const example = `רשימת קניות ליום שישי פריטים לחם חלב גבינה`;
                 await sock.sendMessage(remoteJid, { text: `איך להשתמש: "${example}"` }, { quoted: msg });
             }
             return; // Stop processing this message

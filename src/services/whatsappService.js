@@ -17,7 +17,7 @@ async function connectToWhatsApp(io) {
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.macOS('Desktop'), // שימוש בהגדרת דפדפן רשמית ובטוחה של הספרייה
+        browser: ['AI Agent', 'Chrome', '1.0.0'], // שם ייחודי למניעת התנגשויות דפדפן במחשב
         keepAliveIntervalMs: 30000 // שליחת אות חיים כל 30 שניות למניעת ניתוקים
     });
 
@@ -58,7 +58,7 @@ async function connectToWhatsApp(io) {
             io.emit('disconnected');
             if (shouldReconnect) {
                 isReconnecting = true;
-                setTimeout(connectToWhatsApp, 5000);
+                setTimeout(() => connectToWhatsApp(io), 5000);
             }
         } else if (connection === 'open') {
             isAgentReady = true; // הסוכן מוכן לקבל הודעות חדשות

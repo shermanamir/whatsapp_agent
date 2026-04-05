@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
 const fs = require('fs');
+const path = require('path');
 
 // Import services and handlers
 const { connectToWhatsApp, getIsAgentReady, setIsAgentReady } = require('./services/whatsappService');
@@ -24,11 +25,11 @@ const io = new Server(server);
 
 // --- Express Endpoints ---
 app.get('/', (req, res) => {
-    res.sendFile(__dirname + '/../index.html');
+    res.sendFile(path.join(__dirname, '..', 'index.html'));
 });
 
 app.get('/setup', (req, res) => {
-    res.sendFile(__dirname + '/../setup.html');
+    res.sendFile(path.join(__dirname, '..', 'setup.html'));
 });
 
 app.get('/api/status', (req, res) => {
@@ -108,6 +109,6 @@ async function startApp() {
 
 startApp();
 
-server.listen(3000, () => {
-    console.log('Web server listening on port 3000. Open http://localhost:3000 in your browser.');
+server.listen(3001, () => {
+    console.log('Web server listening on port 3001. Open http://localhost:3001 in your browser.');
 });

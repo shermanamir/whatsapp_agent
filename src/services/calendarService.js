@@ -7,13 +7,17 @@ function preAnalyzeForCalendar(text) {
 }
 
 async function analyzeForCalendarEvent(text) {
-    try {
-        const now = new Date();
-        const model = genAI.getGenerativeModel({
-            model: "gemini-2.5-flash",
-            generationConfig: { responseMimeType: "application/json" }
-        });
-        const prompt = `
+    const maxRetries = 3;
+    let attempt = 0;
+
+    while (attempt < maxRetries) {
+        try {
+            const now = new Date();
+            const model = genAI.getGenerativeModel({
+                model: "gemini-2.5-pro",
+                generationConfig: { responseMimeType: "application/json" }
+            });
+            const prompt = `
         התאריך והשעה הנוכחיים: ${now.toISOString()}.
         נתח את ההודעה הבאה:
         "${text}"
@@ -32,40 +36,49 @@ async function analyzeForCalendarEvent(text) {
         - אם צוינה רק שעה בלי תאריך, השתמש בתאריך של היום (אלא אם כן מונח יחסי כמו "מחר" מציין אחרת).
         - אם צוין רק תאריך בלי שעה, הגדר hour ו-minute כ-null (זה ייחשב אירוע של יום שלם).
         `;
-        const result = await model.generateContent(prompt);
-        let rawText = result.response.text();
-        rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+            const result = await model.generateContent(prompt);
+            let rawText = result.response.text();
+            rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
 
-        const parsedData = JSON.parse(rawText);
+            const parsedData = JSON.parse(rawText);
 
-        if (parsedData.hasEvent) {
-            let startDate = new Date();
-            let isAllDay = false;
+            if (parsedData.hasEvent) {
+                let startDate = new Date();
+                let isAllDay = false;
 
-            if (parsedData.year && parsedData.month && parsedData.day) {
-                startDate.setFullYear(parsedData.year, parsedData.month - 1, parsedData.day);
-            }
-            if (parsedData.hour !== null && parsedData.minute !== null) {
-                startDate.setHours(parsedData.hour, parsedData.minute, 0, 0);
-            } else {
-                isAllDay = true;
-            }
+                if (parsedData.year && parsedData.month && parsedData.day) {
+                    startDate.setFullYear(parsedData.year, parsedData.month - 1, parsedData.day);
+                }
+                if (parsedData.hour !== null && parsedData.minute !== null) {
+                    startDate.setHours(parsedData.hour, parsedData.minute, 0, 0);
+                } else {
+                    isAllDay = true;
+                }
 
-            if (!isAllDay) {
-                const timeDiff = startDate.getTime() - now.getTime();
-                // ביטול זימון אם הזמן שנקבע הוא פחות משעה מהרגע הנוכחי (או בעבר)
-                if (timeDiff < 60 * 60 * 1000) {
-                    parsedData.hasEvent = false;
-                    console.log(`[DEBUG] אירוע יומן בוטל - הזמן שזוהה הוא פחות משעה מהרגע הנוכחי או בעבר.`);
+                if (!isAllDay) {
+                    const timeDiff = startDate.getTime() - now.getTime();
+                    // ביטול זימון אם הזמן שנקבע הוא פחות משעה מהרגע הנוכחי (או בעבר)
+                    if (timeDiff < 60 * 60 * 1000) {
+                        parsedData.hasEvent = false;
+                        console.log(`[DEBUG] אירוע יומן בוטל - הזמן שזוהה הוא פחות משעה מהרגע הנוכחי או בעבר.`);
+                    }
                 }
             }
-        }
 
-        return parsedData;
-    } catch (e) {
-        console.error("שגיאה בניתוח יומן:", e);
-        return { hasEvent: false };
+            return parsedData;
+        } catch (e) {
+            console.error(`שגיאה בניתוח יומן (נסיון ${attempt + 1}/${maxRetries}):`, e);
+            if (e.status === 429 && attempt < maxRetries - 1) {
+                const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
+                console.log(`ממתין ${delay}ms לפני נסיון נוסף...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                attempt++;
+            } else {
+                return { hasEvent: false };
+            }
+        }
     }
+    return { hasEvent: false };
 }
 
 function createCalendarLink(eventData, title, description) {

@@ -207,7 +207,7 @@ async function connectToWhatsApp() {
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.macOS('Desktop'), // שימוש בהגדרת דפדפן רשמית ובטוחה של הספרייה
+        browser: ['AI Agent', 'Chrome', '1.0.0'], // שם ייחודי למניעת התנגשויות דפדפן במחשב
         keepAliveIntervalMs: 30000 // שליחת אות חיים כל 30 שניות למניעת ניתוקים
     });
     
@@ -561,7 +561,7 @@ async function handleGeminiCommand(body, trigger, jid) {
 
     try {
         const model = genAI.getGenerativeModel({
-            model: "gemini-2.5-flash",
+            model: "gemini-2.5-pro",
             tools: tools,
             systemInstruction: "אתה עוזר חכם בוואטסאפ. כשהמשתמש מבקש לשלוח הודעה למישהו (גם אם השם נשמע כמו כינוי כגון 'אשתי האהובה', 'אחי' וכו'), אל תשאל שאלות הבהרה! פשוט הפעל את הפונקציה sendWhatsappMessage והעבר אליה את השם המדויק שהמשתמש כתב."
         });
@@ -619,7 +619,7 @@ async function sendMessageToContact(contactNameOrPhone, message) {
 
 async function transcribeAudio(media) {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro" });
         const prompt = "תמלל את ההודעה הקולית הבאה בעברית בצורה מדויקת. אל תוסיף הקדמות או תוספות, רק את המלל שנאמר.";
         const audioPart = {
             inlineData: {
@@ -646,7 +646,7 @@ async function analyzeForCalendarEvent(text) {
     try {
         const now = new Date();
         const model = genAI.getGenerativeModel({
-            model: "gemini-2.5-flash",
+            model: "gemini-2.5-pro",
             generationConfig: { responseMimeType: "application/json" }
         });
         const prompt = `
