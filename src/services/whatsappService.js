@@ -17,7 +17,7 @@ async function connectToWhatsApp(io) {
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['AI Agent', 'Chrome', '1.0.0'], // שם ייחודי למניעת התנגשויות דפדפן במחשב
+        browser: Browsers.macOS('Desktop'), // חזרה לדפדפן רשמי - וואטסאפ חוסמת שמות מותאמים אישית
         keepAliveIntervalMs: 30000 // שליחת אות חיים כל 30 שניות למניעת ניתוקים
     });
 
@@ -77,9 +77,6 @@ async function connectToWhatsApp(io) {
                     console.error('Error sending reconnect confirmation:', err);
                 }
             }
-            isAgentReady = true; // הסוכן מוכן לקבל הודעות חדשות
-            console.log('הסוכן התחבר לוואטסאפ בהצלחה וממתין להודעות!');
-            io.emit('ready');
         }
     });
 
