@@ -54,7 +54,7 @@ const tools = [
 ];
 
 // --- Constants ---
-const CONTACTS_FILE = './contacts.json';
+const CONTACTS_FILE = process.env.CONTACTS_FILE || './contacts.json';
 const geminiTriggers = ['גמיני', "ג'ימיני", "ג׳ימיני", "ג'מיני", "ג׳מיני"];
 
 module.exports = {

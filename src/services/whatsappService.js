@@ -7,7 +7,8 @@ let isAgentReady = false;
 let isReconnecting = false;
 
 async function connectToWhatsApp(io) {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    const sessionDir = process.env.SESSION_DIR || 'auth_info_baileys';
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
 
     // שליפת הגרסה העדכנית ביותר של וואטסאפ כדי למנוע דחיית חיבור
     const { version } = await fetchLatestBaileysVersion();

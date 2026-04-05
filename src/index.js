@@ -109,6 +109,7 @@ async function startApp() {
 
 startApp();
 
-server.listen(3001, () => {
-    console.log('Web server listening on port 3001. Open http://localhost:3001 in your browser.');
+const PORT = process.env.PORT || 3001;
+server.listen(PORT, () => {
+    console.log(`Web server listening on port ${PORT}. Open http://localhost:${PORT} in your browser.`);
 });
